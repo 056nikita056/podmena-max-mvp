@@ -25,7 +25,7 @@ export function openStore(path) {
     CREATE TABLE IF NOT EXISTS candidates (id INTEGER PRIMARY KEY, workspace_id TEXT NOT NULL, name TEXT NOT NULL, source TEXT NOT NULL, skills TEXT NOT NULL, rate_kopecks INTEGER NOT NULL, experience_years INTEGER NOT NULL, available INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS shifts (id INTEGER PRIMARY KEY, workspace_id TEXT NOT NULL, site_id INTEGER NOT NULL, role TEXT NOT NULL, starts_at TEXT NOT NULL, ends_at TEXT NOT NULL, pay_kopecks INTEGER NOT NULL, skills TEXT NOT NULL, description TEXT NOT NULL, decision_deadline TEXT NOT NULL, sources TEXT NOT NULL, scenario TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS publications (id INTEGER PRIMARY KEY, shift_id INTEGER NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL, UNIQUE(shift_id, source));
-    CREATE TABLE IF NOT EXISTS responses (id INTEGER PRIMARY KEY, shift_id INTEGER NOT NULL, candidate_id INTEGER NOT NULL, status TEXT NOT NULL, reasons TEXT NOT NULL, UNIQUE(shift_id, candidate_id));
+    CREATE TABLE IF NOT EXISTS responses (id INTEGER PRIMARY KEY, shift_id INTEGER NOT NULL, candidate_id INTEGER NOT NULL, status TEXT NOT NULL, reasons TEXT NOT NULL, contact_source TEXT, UNIQUE(shift_id, candidate_id));
     CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, shift_id INTEGER NOT NULL, candidate_id INTEGER NOT NULL, sender TEXT NOT NULL, text TEXT NOT NULL, modelled INTEGER NOT NULL, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS offers (id INTEGER PRIMARY KEY, shift_id INTEGER NOT NULL, candidate_id INTEGER NOT NULL, status TEXT NOT NULL, starts_at TEXT NOT NULL, ends_at TEXT NOT NULL, pay_kopecks INTEGER NOT NULL, site_name TEXT NOT NULL, created_at TEXT NOT NULL);
     CREATE UNIQUE INDEX IF NOT EXISTS one_active_offer ON offers(shift_id) WHERE status IN ('pending','confirmed');
@@ -35,6 +35,9 @@ export function openStore(path) {
     CREATE TABLE IF NOT EXISTS bot_chats (workspace_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS bot_updates (update_key TEXT PRIMARY KEY, created_at TEXT NOT NULL);
   `);
+  if (!db.prepare('PRAGMA table_info(responses)').all().some(column => column.name === 'contact_source')) {
+    db.exec('ALTER TABLE responses ADD COLUMN contact_source TEXT');
+  }
   const get = (sql, ...args) => db.prepare(sql).get(...args);
   const all = (sql, ...args) => db.prepare(sql).all(...args);
   const run = (sql, ...args) => db.prepare(sql).run(...args);

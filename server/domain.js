@@ -21,7 +21,7 @@ export function createDomain(store) {
   function detail(workspace, id) {
     const sh = shift(workspace, id);
     const publications = all('SELECT source,status,detail FROM publications WHERE shift_id=? ORDER BY id', id);
-    const responses = all('SELECT r.id,r.candidate_id AS candidateId,r.status,r.reasons,c.name,c.source,c.skills,c.rate_kopecks,c.experience_years,c.available FROM responses r JOIN candidates c ON c.id=r.candidate_id WHERE r.shift_id=? ORDER BY r.id', id).map(r => ({ ...r, reasons: parse(r.reasons), skills: parse(r.skills), rateRub: r.rate_kopecks / 100, experienceYears: r.experience_years, available: Boolean(r.available) }));
+    const responses = all('SELECT r.id,r.candidate_id AS candidateId,r.status,r.reasons,c.name,COALESCE(r.contact_source,c.source) AS source,c.skills,c.rate_kopecks,c.experience_years,c.available FROM responses r JOIN candidates c ON c.id=r.candidate_id WHERE r.shift_id=? ORDER BY r.id', id).map(r => ({ ...r, reasons: parse(r.reasons), skills: parse(r.skills), rateRub: r.rate_kopecks / 100, experienceYears: r.experience_years, available: Boolean(r.available) }));
     const messages = all('SELECT id,candidate_id AS candidateId,sender,text,modelled,created_at AS createdAt FROM messages WHERE shift_id=? ORDER BY id', id).map(m => ({ ...m, modelled: Boolean(m.modelled) }));
     const offer = get('SELECT o.id,o.candidate_id AS candidateId,o.status,o.starts_at AS startsAt,o.ends_at AS endsAt,o.pay_kopecks/100 AS payRub,o.site_name AS siteName,o.created_at AS createdAt,c.name FROM offers o JOIN candidates c ON c.id=o.candidate_id WHERE o.shift_id=? ORDER BY o.id DESC LIMIT 1', id) || null;
     const events = all('SELECT kind,text,created_at AS createdAt FROM events WHERE shift_id=? ORDER BY id DESC', id);
@@ -58,12 +58,14 @@ export function createDomain(store) {
         const failed = sh.scenario === 'source_error' && source === 'profi';
         run('INSERT INTO publications(shift_id,source,status,detail) VALUES (?,?,?,?) ON CONFLICT(shift_id,source) DO UPDATE SET status=excluded.status,detail=excluded.detail', id, source, failed ? 'failed' : 'sent', failed ? 'Демо: источник временно недоступен' : 'Демо: обращение создано');
         if (failed || sh.scenario === 'no_results') continue;
-        const people = all('SELECT * FROM candidates WHERE workspace_id=? AND source=?', workspace, source);
+        const people = source === 'reserve'
+          ? all('SELECT c.* FROM candidates c JOIN reserve r ON r.candidate_id=c.id AND r.workspace_id=c.workspace_id WHERE c.workspace_id=?', workspace)
+          : all('SELECT * FROM candidates WHERE workspace_id=? AND source=?', workspace, source);
         for (const person of people) {
           const skills = parse(person.skills);
           if (!person.available || !sh.skills.every(x => skills.includes(x)) || person.rate_kopecks > sh.pay_kopecks || hasOverlap(workspace, person.id, sh)) continue;
           const reasons = [`Навыки: ${sh.skills.join(', ')}`, `Ставка ${person.rate_kopecks / 100} ₽ в бюджете`, 'Доступность указана в демо-профиле'];
-          run('INSERT OR IGNORE INTO responses(shift_id,candidate_id,status,reasons) VALUES (?,?,?,?)', id, person.id, 'new', JSON.stringify(reasons));
+          run('INSERT OR IGNORE INTO responses(shift_id,candidate_id,status,reasons,contact_source) VALUES (?,?,?,?,?)', id, person.id, 'new', JSON.stringify(reasons), source);
         }
       }
       const count = get('SELECT COUNT(*) AS n FROM responses WHERE shift_id=?', id).n;

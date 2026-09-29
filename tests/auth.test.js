@@ -18,6 +18,7 @@ test('MAX initData signature and age are checked before workspace creation', () 
   assert.throws(() => verifyMaxInitData(good.replace('q1', 'q2'), token, now), /Подпись/);
   assert.throws(() => verifyMaxInitData(signed(token, Math.floor(now / 1000) - 3601), token, now), /устарели/);
   assert.throws(() => verifyMaxInitData(good + '&user=other', token, now), /Некорректные/);
+  assert.throws(() => verifyMaxInitData('user=%ZZ&hash=abc', token, now), /Некорректные данные MAX/);
 });
 
 test('webhook requires configured matching secret', () => {

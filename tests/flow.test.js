@@ -126,3 +126,21 @@ test('confirmed shift and conversation persist through server restart', async ()
     assert.equal(saved.offer.status, 'confirmed');
   } finally { if (app.listening) await new Promise(resolve => app.close(resolve)); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('saved external candidate can be found through reserve on a later non-overlapping shift', async () => {
+  const fx = await fixture();
+  try {
+    await fx.request('/api/auth/demo', 'POST', { persona: 'manager' });
+    const first = await fx.request('/api/shifts', 'POST', shiftInput);
+    const searched = await fx.request(`/api/shifts/${first.data.shift.id}/search`, 'POST', {});
+    const external = searched.data.responses.find(x => x.source === 'youdo');
+    await fx.request(`/api/shifts/${first.data.shift.id}/offer`, 'POST', { candidateId: external.candidateId });
+    await fx.request(`/api/shifts/${first.data.shift.id}/demo-decision`, 'POST', { decision: 'confirm' });
+    await fx.request(`/api/shifts/${first.data.shift.id}/reserve`, 'POST', { candidateId: external.candidateId });
+    const later = await fx.request('/api/shifts', 'POST', { ...shiftInput, startsAt: '2026-10-04T06:00:00.000Z', endsAt: '2026-10-04T14:00:00.000Z', decisionDeadline: '2026-10-03T18:00:00.000Z', sources: ['reserve'] });
+    const found = await fx.request(`/api/shifts/${later.data.shift.id}/search`, 'POST', {});
+    const saved = found.data.responses.find(x => x.candidateId === external.candidateId);
+    assert.ok(saved);
+    assert.equal(saved.source, 'reserve');
+  } finally { await fx.close(); }
+});

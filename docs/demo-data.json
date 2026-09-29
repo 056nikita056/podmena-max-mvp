@@ -1,0 +1,14 @@
+{
+  "business": "Кофейни «Смена»",
+  "timezone": "Europe/Moscow",
+  "sites": ["Точка на Покровке", "Точка на Бауманской"],
+  "candidateCount": 10,
+  "sources": ["staff", "reserve", "youdo (демо-модель)", "profi (демо-модель)"],
+  "scenarios": ["success", "no_results", "decline", "source_error"],
+  "exampleShift": {
+    "role": "Бариста",
+    "skills": ["Эспрессо"],
+    "payRub": 6000,
+    "description": "Утренняя смена"
+  }
+}

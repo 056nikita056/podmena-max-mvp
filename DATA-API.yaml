@@ -1,0 +1,112 @@
+# Локальная структура описания проверок. Официальная схема валидатора не предоставлена.
+schemaVersion: local-1.0
+solution: Подмена
+baseUrl: https://YOUR_DOMAIN
+authentication:
+  role: manager
+  method: MAX Bridge initData -> POST /api/auth/max -> HttpOnly cookie
+  localDemo: POST /api/auth/demo with persona manager, only ENABLE_BROWSER_DEMO=1
+checks:
+  - id: health
+    role: public
+    method: GET
+    path: /api/health
+    request: {}
+    expectedStatus: [200]
+    response: { contentType: application/json, required: [ok, database] }
+  - id: login
+    role: max_user
+    method: POST
+    path: /api/auth/max
+    request: { body: { initData: signed_MAX_Bridge_string } }
+    expectedStatus: [200, 401]
+    response: { contentType: application/json, required: [ok] }
+  - id: bootstrap
+    role: manager
+    method: GET
+    path: /api/bootstrap
+    request: { headers: { Cookie: podmena_session } }
+    expectedStatus: [200, 401]
+    response: { contentType: application/json, required: [business, sites, reserve] }
+  - id: create_shift
+    role: manager
+    method: POST
+    path: /api/shifts
+    request:
+      headers: { Cookie: podmena_session, Content-Type: application/json }
+      body:
+        siteId: 1
+        role: Бариста
+        startsAt: '2026-10-02T06:00:00.000Z'
+        endsAt: '2026-10-02T14:00:00.000Z'
+        payRub: 6000
+        skills: [Эспрессо]
+        description: Утренняя смена
+        decisionDeadline: '2026-10-01T18:00:00.000Z'
+        sources: [staff, reserve, youdo, profi]
+        scenario: success
+    expectedStatus: [201, 400, 401]
+    response: { contentType: application/json, required: [shift, publications, responses, messages, offer, events] }
+  - id: list_shifts
+    role: manager
+    method: GET
+    path: /api/shifts
+    request: { headers: { Cookie: podmena_session } }
+    expectedStatus: [200, 401]
+    response: { contentType: application/json, required: [shifts] }
+  - id: shift_detail
+    role: manager
+    method: GET
+    path: /api/shifts/{id}
+    request: { pathParameters: { id: created_shift_id }, headers: { Cookie: podmena_session } }
+    expectedStatus: [200, 401, 404]
+    response: { contentType: application/json, required: [shift, publications, responses, messages, offer, events] }
+  - id: search
+    role: manager
+    method: POST
+    path: /api/shifts/{id}/search
+    request: { pathParameters: { id: created_shift_id }, headers: { Cookie: podmena_session } }
+    expectedStatus: [200, 401, 404, 409]
+    response: { contentType: application/json, required: [shift, publications, responses] }
+  - id: message
+    role: manager
+    method: POST
+    path: /api/shifts/{id}/messages
+    request: { pathParameters: { id: created_shift_id }, body: { candidateId: response_candidate_id, text: 'Сможете выйти?' } }
+    expectedStatus: [201, 400, 401, 404, 409]
+    response: { contentType: application/json, required: [shift, messages] }
+  - id: offer
+    role: manager
+    method: POST
+    path: /api/shifts/{id}/offer
+    request: { pathParameters: { id: created_shift_id }, body: { candidateId: response_candidate_id } }
+    expectedStatus: [200, 400, 401, 404, 409]
+    response: { contentType: application/json, required: [shift, offer] }
+  - id: candidate_decision_demo
+    role: manager
+    method: POST
+    path: /api/shifts/{id}/demo-decision
+    request: { pathParameters: { id: created_shift_id }, body: { decision: confirm } }
+    expectedStatus: [200, 400, 401, 403, 404, 409]
+    response: { contentType: application/json, required: [shift, offer, events] }
+  - id: attendance
+    role: manager
+    method: POST
+    path: /api/shifts/{id}/attendance
+    request: { pathParameters: { id: created_shift_id }, body: { value: arrived } }
+    expectedStatus: [200, 400, 401, 404, 409]
+    response: { contentType: application/json, required: [shift, events] }
+  - id: reserve
+    role: manager
+    method: POST
+    path: /api/shifts/{id}/reserve
+    request: { pathParameters: { id: created_shift_id }, body: { candidateId: response_candidate_id } }
+    expectedStatus: [200, 400, 401, 404, 409]
+    response: { contentType: application/json, required: [reserve] }
+  - id: cancel
+    role: manager
+    method: POST
+    path: /api/shifts/{id}/cancel
+    request: { pathParameters: { id: active_shift_id } }
+    expectedStatus: [200, 401, 404, 409]
+    response: { contentType: application/json, required: [shift, events] }

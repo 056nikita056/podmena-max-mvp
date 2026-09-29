@@ -12,7 +12,8 @@ export function verifyMaxInitData(initData, botToken, current = Date.now()) {
   const pairs = initData.split('&').map(item => {
     const at = item.indexOf('=');
     if (at < 1) throw new AppError(401, 'Некорректные данные MAX');
-    return [decodeURIComponent(item.slice(0, at)), decodeURIComponent(item.slice(at + 1).replaceAll('+', ' '))];
+    try { return [decodeURIComponent(item.slice(0, at)), decodeURIComponent(item.slice(at + 1).replaceAll('+', ' '))]; }
+    catch { throw new AppError(401, 'Некорректные данные MAX'); }
   });
   const keys = pairs.map(x => x[0]);
   if (new Set(keys).size !== keys.length || keys.filter(x => x === 'hash').length !== 1) throw new AppError(401, 'Некорректные данные MAX');
