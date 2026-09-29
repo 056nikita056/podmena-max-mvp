@@ -2,6 +2,7 @@ const SOURCES = ['staff', 'reserve', 'youdo', 'profi', 'max'];
 const SCENARIOS = ['success', 'no_results', 'decline', 'source_error'];
 const now = () => new Date().toISOString();
 const parse = value => { try { return JSON.parse(value); } catch { return []; } };
+const dateTextForReply = value => new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }).format(new Date(value));
 export class AppError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const bad = message => { throw new AppError(400, message); };
 const conflict = message => { throw new AppError(409, message); };
@@ -38,7 +39,7 @@ export function createDomain(store) {
     if (![start, end, deadline].every(Number.isFinite) || end <= start || end - start > 24 * 3600000) bad('Проверьте время смены');
     if (deadline >= start) bad('Срок решения должен быть до начала смены');
     if (!Number.isInteger(body.payRub) || body.payRub < 1000 || body.payRub > 100000) bad('Укажите оплату за смену от 1 000 до 100 000 ₽');
-    if (!Array.isArray(body.skills) || !body.skills.length || body.skills.length > 8 || body.skills.some(x => typeof x !== 'string' || x.length > 40)) bad('Укажите обязательные навыки');
+    if (!Array.isArray(body.skills) || !body.skills.length || body.skills.length > 8 || body.skills.some(x => typeof x !== 'string' || x.length > 120)) bad('Укажите обязательные навыки');
     if (!Array.isArray(body.sources) || !body.sources.length || body.sources.some(x => !SOURCES.includes(x)) || new Set(body.sources).size !== body.sources.length) bad('Выберите источники');
     if (typeof body.description !== 'string' || body.description.length > 500) bad('Описание не должно превышать 500 символов');
     const scenario = body.scenario || 'success';
@@ -60,12 +61,14 @@ export function createDomain(store) {
         workspace, profile.name, 'max', JSON.stringify([profile.skill]), profile.rate_kopecks, 0, profile.available, profile.user_id);
     }
   }
-  async function search(workspace, id) {
+  async function search(workspace, id, options = {}) {
     const sh = await shift(workspace, id);
     if (!['draft', 'searching', 'unfilled'].includes(sh.status)) conflict('Поиск сейчас недоступен');
-    if (sh.sources.includes('max')) await syncMaxCandidates(workspace);
+    const sources = options.sources || sh.sources;
+    if (!Array.isArray(sources) || sources.some(source => !sh.sources.includes(source))) bad('Неизвестный источник поиска');
+    if (sources.includes('max')) await syncMaxCandidates(workspace);
     await transaction(async () => {
-      for (const source of sh.sources) {
+      for (const source of sources) {
         const failed = sh.scenario === 'source_error' && source === 'profi';
         await run('INSERT INTO publications(shift_id,source,status,detail) VALUES (?,?,?,?) ON CONFLICT(shift_id,source) DO UPDATE SET status=excluded.status,detail=excluded.detail', id, source, failed ? 'failed' : 'sent', source === 'max' ? 'Поиск среди зарегистрированных кандидатов MAX' : failed ? 'Демо: источник временно недоступен' : 'Демо: обращение создано');
         if (failed || sh.scenario === 'no_results') continue;
@@ -74,9 +77,14 @@ export function createDomain(store) {
           : await all('SELECT * FROM candidates WHERE workspace_id=? AND source=?', workspace, source);
         for (const person of people) {
           const skills = parse(person.skills);
-          if (!person.available || !sh.skills.every(x => skills.includes(x)) || person.rate_kopecks > sh.pay_kopecks || await hasOverlap(workspace, person.id, sh)) continue;
-          const reasons = [`Навыки: ${sh.skills.join(', ')}`, `Ставка ${person.rate_kopecks / 100} ₽ в бюджете`, source === 'max' ? 'Доступность указана кандидатом в MAX' : 'Доступность указана в демо-профиле'];
+          const exactSkill = sh.skills.every(x => skills.includes(x));
+          if (!person.available || (!['max', 'youdo', 'profi'].includes(source) && !exactSkill) || (person.rate_kopecks > sh.pay_kopecks && !options.modelledReplies) || await hasOverlap(workspace, person.id, sh)) continue;
+          const reasons = [exactSkill ? `Навык в профиле: ${skills.join(', ')}` : `Заявлен навык: ${skills.join(', ')}; требование «${sh.skills.join(', ')}» нужно уточнить`, person.rate_kopecks <= sh.pay_kopecks ? `Ставка ${person.rate_kopecks / 100} ₽ в бюджете` : `Ставка ${person.rate_kopecks / 100} ₽ выше бюджета`, source === 'max' ? 'Доступность указана кандидатом в MAX' : 'Доступность указана в демо-профиле'];
           await run('INSERT OR IGNORE INTO responses(shift_id,candidate_id,status,reasons,contact_source) VALUES (?,?,?,?,?)', id, person.id, 'new', JSON.stringify(reasons), source);
+          if (options.modelledReplies && ['youdo', 'profi'].includes(source) && !(await get('SELECT 1 FROM messages WHERE shift_id=? AND candidate_id=? AND sender=?', id, person.id, 'candidate'))) {
+            const reply = source === 'youdo' ? `Здравствуйте! Могу выйти на смену ${dateTextForReply(sh.starts_at)}. Работал(а) с кофейным оборудованием, уточните требования на месте.` : `Добрый день! Дата и оплата подходят. Есть опыт работы бариста, готов(а) обсудить детали смены.`;
+            await run('INSERT INTO messages(shift_id,candidate_id,sender,text,modelled,created_at) VALUES (?,?,?,?,?,?)', id, person.id, 'candidate', reply, 1, now());
+          }
         }
       }
       const count = (await get('SELECT COUNT(*) AS n FROM responses WHERE shift_id=?', id)).n;

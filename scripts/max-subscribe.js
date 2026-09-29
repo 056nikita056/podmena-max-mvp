@@ -8,9 +8,11 @@ const url = publicUrl + '/api/max/webhook';
 const current = await maxApi('/subscriptions', { token });
 if (!current.ok) { console.error(`Не удалось проверить подписки: HTTP ${current.status}`); process.exit(1); }
 const subscriptions = current.data.subscriptions || [];
-if (subscriptions.some(s => s.url === url)) { console.log('Webhook уже подписан на этот адрес'); process.exit(0); }
-if (subscriptions.length) { console.error('У бота есть другая активная подписка. Проверьте её вручную перед изменением.'); process.exit(1); }
-const response = await maxApi('/subscriptions', { token, method: 'POST', body: { url, update_types: ['bot_started', 'message_created'], secret } });
+const active = subscriptions.find(s => s.url === url);
+const types = ['bot_started', 'message_created', 'message_callback'];
+if (active && types.every(type => active.update_types?.includes(type))) { console.log('Webhook подписан на все нужные события'); process.exit(0); }
+if (subscriptions.length && !active) { console.error('У бота есть другая активная подписка. Проверьте её вручную перед изменением.'); process.exit(1); }
+const response = await maxApi('/subscriptions', { token, method: 'POST', body: { url, update_types: types, secret } });
 const result = response.data;
 if (!response.ok || result.success === false) { console.error(`Не удалось создать подписку: HTTP ${response.status}`); process.exit(1); }
 console.log('Webhook подписан на подготовленный HTTPS-адрес');

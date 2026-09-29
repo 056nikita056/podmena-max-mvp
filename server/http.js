@@ -7,6 +7,7 @@ import { createDomain, AppError } from './domain.js';
 import { createSession, readSession, verifyMaxInitData, verifyWebhookSecret } from './auth.js';
 import { maxApi } from './max-api.js';
 import { createChatBot } from './chat-bot.js';
+import { waitUntil } from '@vercel/functions';
 
 const root = resolve('dist');
 const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png' };
@@ -40,12 +41,45 @@ export function createServer(config = {}) {
   async function sendBot(userId, text, buttons = []) {
     if (!userId) throw new Error('MAX user_id не задан');
     const payload = { text };
-    if (buttons.length) payload.attachments = [{ type: 'inline_keyboard', payload: { buttons: buttons.map(row => row.map(label => ({ type: 'message', text: label }))) } }];
+    if (buttons.length) payload.attachments = [{ type: 'inline_keyboard', payload: { buttons: buttons.map(row => row.map(item => typeof item === 'string' ? ({ type: 'message', text: item }) : ({ type: 'callback', text: item.text, payload: item.payload }))) } }];
     if (config.sendBotMessage) return config.sendBotMessage(userId, payload);
     if (!botToken) throw new Error('MAX_BOT_TOKEN не задан');
     const result = await maxApi(`/messages?user_id=${encodeURIComponent(userId)}`, { token: botToken, method: 'POST', body: payload });
     if (!result.ok) throw new Error(`MAX notification failed: HTTP ${result.status}`);
     return result;
+  }
+  async function answerCallback(callbackId) {
+    if (!callbackId) return;
+    if (config.answerBotCallback) return config.answerBotCallback(callbackId);
+    if (!botToken) return;
+    const response = await maxApi(`/answers?callback_id=${encodeURIComponent(callbackId)}`, { token: botToken, method: 'POST', body: {} });
+    if (!response.ok || response.data?.success === false) console.error(`MAX callback acknowledgment failed: HTTP ${response.status}`);
+  }
+  const demoDelayMs = config.demoDelayMs ?? 10000;
+  async function deliverDemo(shiftId, userId) {
+    const job = await (await ready).store.get('SELECT * FROM bot_demo_jobs WHERE shift_id=? AND user_id=?', shiftId, userId);
+    if (!job || job.completed_at) return;
+    const delay = Math.max(0, job.due_at - Date.now());
+    if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+    const { store, chatBot } = await ready;
+    const key = `demo:${shiftId}`;
+    if (!await store.get('SELECT 1 FROM bot_outbox WHERE update_key=?', key)) {
+      const messages = await chatBot.demoArrivals(userId, shiftId);
+      await store.transaction(async () => {
+        for (const [seq, message] of messages.entries()) await store.run('INSERT OR IGNORE INTO bot_outbox(update_key,seq,user_id,payload_json) VALUES (?,?,?,?)', key, seq, userId, JSON.stringify(message));
+      });
+    }
+    for (const row of await store.all('SELECT * FROM bot_outbox WHERE update_key=? AND delivered=0 ORDER BY seq', key)) {
+      const message = JSON.parse(row.payload_json);
+      await sendBot(message.userId, message.text, message.buttons);
+      await store.run('UPDATE bot_outbox SET delivered=1 WHERE update_key=? AND seq=?', key, row.seq);
+    }
+    await store.run('UPDATE bot_demo_jobs SET completed_at=? WHERE shift_id=?', new Date().toISOString(), shiftId);
+  }
+  function deferDemo(shiftId, userId) {
+    const task = deliverDemo(shiftId, userId).catch(error => console.error('Demo delivery failed:', error));
+    if (config.deferTask) config.deferTask(task);
+    else if (process.env.VERCEL) waitUntil(task);
   }
   const server = http.createServer(async (req, res) => {
     try {
@@ -75,9 +109,10 @@ export function createServer(config = {}) {
       if (path === '/api/max/webhook' && method === 'POST') {
         if (!verifyWebhookSecret(req.headers['x-max-bot-api-secret'], config.webhookSecret || process.env.MAX_WEBHOOK_SECRET)) throw new AppError(401, 'Webhook secret не совпал');
         const update = await body(req);
-        const userId = update.user?.user_id || update.message?.sender?.user_id;
+        const userId = update.callback?.user?.user_id || update.user?.user_id || update.message?.sender?.user_id;
         const key = update.update_type === 'message_created'
           ? `message:${update.message?.body?.mid || `${update.timestamp}:${userId}:${update.message?.body?.text || ''}`}`
+          : update.update_type === 'message_callback' ? `callback:${update.callback?.callback_id || `${update.timestamp}:${userId}:${update.callback?.payload || ''}`}`
           : `${update.update_type}:${update.timestamp}:${userId || ''}`;
         if (!await store.get('SELECT 1 FROM bot_updates WHERE update_key=?', key)) {
           const messages = await chatBot.handle(update);
@@ -91,7 +126,12 @@ export function createServer(config = {}) {
           const message = JSON.parse(row.payload_json);
           await sendBot(message.userId, message.text, message.buttons);
           await store.run('UPDATE bot_outbox SET delivered=1 WHERE update_key=? AND seq=?', key, row.seq);
+          if (message.demoShiftId) {
+            await store.run('INSERT OR IGNORE INTO bot_demo_jobs(shift_id,user_id,due_at) VALUES (?,?,?)', message.demoShiftId, message.userId, Date.now() + demoDelayMs);
+            deferDemo(message.demoShiftId, message.userId);
+          }
         }
+        if (update.update_type === 'message_callback') await answerCallback(update.callback?.callback_id);
         return json(res, 200, { ok: true });
       }
       if (path.startsWith('/api/')) {

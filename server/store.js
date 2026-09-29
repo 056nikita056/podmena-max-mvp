@@ -40,6 +40,7 @@ export async function openStore(path) {
     CREATE TABLE IF NOT EXISTS bot_dialogs (user_id INTEGER PRIMARY KEY, mode TEXT NOT NULL DEFAULT '', stage TEXT NOT NULL DEFAULT '', draft_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS bot_candidate_profiles (user_id INTEGER PRIMARY KEY, name TEXT NOT NULL, skill TEXT NOT NULL, rate_kopecks INTEGER NOT NULL, available INTEGER NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS bot_outbox (update_key TEXT NOT NULL, seq INTEGER NOT NULL, user_id INTEGER NOT NULL, payload_json TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(update_key,seq));
+    CREATE TABLE IF NOT EXISTS bot_demo_jobs (shift_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, due_at INTEGER NOT NULL, completed_at TEXT);
   `;
   for (const sql of schema.split(';').map(part => part.trim()).filter(Boolean)) await db.execute(sql);
   const txContext = new AsyncLocalStorage();
