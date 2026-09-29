@@ -1,0 +1,12 @@
+.env
+.env.*
+.vercel/
+node_modules/
+dist/
+data/
+output/
+private/
+docs/screenshots/
+*.sqlite
+*.sqlite-*
+.DS_Store
