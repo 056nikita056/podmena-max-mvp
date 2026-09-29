@@ -51,6 +51,7 @@ export function createServer(config = {}) {
       const { store, domain } = await ready;
       if (method !== 'GET' && req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) throw new AppError(403, 'Недоверенный источник запроса');
       if (path === '/api/health' && method === 'GET') return json(res, 200, { ok: true, database: 'ready' });
+      if (path === '/api/config' && method === 'GET') return json(res, 200, { browserDemo: demoMode && (config.browserDemo === true || process.env.ENABLE_BROWSER_DEMO === '1') });
       if (path === '/api/auth/demo' && method === 'POST') {
         if (!demoMode || (!config.browserDemo && process.env.ENABLE_BROWSER_DEMO !== '1')) throw new AppError(403, 'Вход для браузерной демонстрации выключен');
         const input = await body(req);

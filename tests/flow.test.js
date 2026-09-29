@@ -5,9 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from '../server/http.js';
 
-async function fixture() {
+async function fixture({ browserDemo = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'podmena-'));
-  const app = createServer({ databasePath: join(dir, 'app.sqlite'), browserDemo: true, sessionSecret: 'test-secret' });
+  const app = createServer({ databasePath: join(dir, 'app.sqlite'), browserDemo, sessionSecret: 'test-secret' });
   await new Promise(resolve => app.listen(0, resolve));
   const base = `http://127.0.0.1:${app.address().port}`;
   const cookies = new Map();
@@ -21,6 +21,14 @@ async function fixture() {
   }
   return { app, dir, request, close: async () => { await new Promise(resolve => app.close(resolve)); rmSync(dir, { recursive: true, force: true }); } };
 }
+
+test('public configuration hides browser demo when its login is disabled', async () => {
+  const fx = await fixture({ browserDemo: false });
+  try {
+    assert.deepEqual((await fx.request('/api/config')).data, { browserDemo: false });
+    assert.equal((await fx.request('/api/auth/demo', 'POST', { persona: 'manager' })).status, 403);
+  } finally { await fx.close(); }
+});
 
 const shiftInput = {
   siteId: 1, role: 'Бариста', startsAt: '2026-10-02T06:00:00.000Z', endsAt: '2026-10-02T14:00:00.000Z',
