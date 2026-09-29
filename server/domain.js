@@ -22,7 +22,7 @@ export function createDomain(store) {
   async function detail(workspace, id) {
     const sh = await shift(workspace, id);
     const publications = await all('SELECT source,status,detail FROM publications WHERE shift_id=? ORDER BY id', id);
-    const responses = (await all('SELECT r.id,r.candidate_id AS candidateId,r.status,r.reasons,c.name,COALESCE(r.contact_source,c.source) AS source,c.skills,c.rate_kopecks,c.experience_years,c.available FROM responses r JOIN candidates c ON c.id=r.candidate_id WHERE r.shift_id=? ORDER BY r.id', id)).map(r => ({ ...r, reasons: parse(r.reasons), skills: parse(r.skills), rateRub: r.rate_kopecks / 100, experienceYears: r.experience_years, available: Boolean(r.available) }));
+    const responses = (await all('SELECT r.id,r.candidate_id AS candidateId,r.status,r.reasons,c.name,COALESCE(r.contact_source,c.source) AS source,c.skills,c.rate_kopecks,c.experience_years,c.available,c.max_profile_url AS maxProfileUrl FROM responses r JOIN candidates c ON c.id=r.candidate_id WHERE r.shift_id=? ORDER BY r.id', id)).map(r => ({ ...r, reasons: parse(r.reasons), skills: parse(r.skills), rateRub: r.rate_kopecks / 100, experienceYears: r.experience_years, available: Boolean(r.available) }));
     const messages = (await all('SELECT id,candidate_id AS candidateId,sender,text,modelled,created_at AS createdAt FROM messages WHERE shift_id=? ORDER BY id', id)).map(m => ({ ...m, modelled: Boolean(m.modelled) }));
     const offer = await get('SELECT o.id,o.candidate_id AS candidateId,o.status,o.starts_at AS startsAt,o.ends_at AS endsAt,o.pay_kopecks/100 AS payRub,o.site_name AS siteName,o.created_at AS createdAt,c.name FROM offers o JOIN candidates c ON c.id=o.candidate_id WHERE o.shift_id=? ORDER BY o.id DESC LIMIT 1', id) || null;
     const events = await all('SELECT kind,text,created_at AS createdAt FROM events WHERE shift_id=? ORDER BY id DESC', id);
@@ -56,9 +56,9 @@ export function createDomain(store) {
   async function syncMaxCandidates(workspace) {
     for (const profile of await all('SELECT * FROM bot_candidate_profiles')) {
       if (workspace === `max:${profile.user_id}`) continue;
-      await run(`INSERT INTO candidates(workspace_id,name,source,skills,rate_kopecks,experience_years,available,max_user_id) VALUES (?,?,?,?,?,?,?,?)
-        ON CONFLICT(workspace_id,max_user_id) WHERE max_user_id IS NOT NULL DO UPDATE SET name=excluded.name,skills=excluded.skills,rate_kopecks=excluded.rate_kopecks,available=excluded.available`,
-        workspace, profile.name, 'max', JSON.stringify([profile.skill]), profile.rate_kopecks, 0, profile.available, profile.user_id);
+      await run(`INSERT INTO candidates(workspace_id,name,source,skills,rate_kopecks,experience_years,available,max_user_id,max_profile_url) VALUES (?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(workspace_id,max_user_id) WHERE max_user_id IS NOT NULL DO UPDATE SET name=excluded.name,skills=excluded.skills,rate_kopecks=excluded.rate_kopecks,available=excluded.available,max_profile_url=excluded.max_profile_url`,
+        workspace, profile.name, 'max', JSON.stringify([profile.skill]), profile.rate_kopecks, 0, profile.available, profile.user_id, profile.max_profile_url);
     }
   }
   async function search(workspace, id, options = {}) {
@@ -167,6 +167,21 @@ export function createDomain(store) {
     await run('INSERT OR IGNORE INTO reserve(workspace_id,candidate_id) VALUES (?,?)', workspace, candidateId);
     return reserve(workspace);
   }
+  async function contactOutcome(workspace, id, candidateId, managerId, agreed) {
+    await shift(workspace, id);
+    const response = await get('SELECT c.name FROM responses r JOIN candidates c ON c.id=r.candidate_id WHERE r.shift_id=? AND r.candidate_id=? AND c.workspace_id=?', id, candidateId, workspace);
+    if (!response) bad('Отклик не найден');
+    await run('INSERT INTO bot_contact_outcomes(shift_id,candidate_id,manager_id,agreed,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(shift_id,candidate_id) DO UPDATE SET agreed=excluded.agreed,updated_at=excluded.updated_at', id, candidateId, managerId, agreed ? 1 : 0, new Date().toISOString());
+    await event(id, agreed ? 'contact_agreed' : 'contact_declined', `${response.name}: ${agreed ? 'управляющий сообщил о договорённости' : 'управляющий сообщил, что договориться не удалось'}`);
+    return response;
+  }
+  async function addContactReserve(workspace, id, candidateId, managerId) {
+    await shift(workspace, id);
+    const outcome = await get('SELECT agreed FROM bot_contact_outcomes WHERE shift_id=? AND candidate_id=? AND manager_id=?', id, candidateId, managerId);
+    if (!outcome?.agreed) conflict('Сначала подтвердите, что удалось договориться');
+    await run('INSERT OR IGNORE INTO reserve(workspace_id,candidate_id) VALUES (?,?)', workspace, candidateId);
+    return reserve(workspace);
+  }
   async function reset(workspace) {
     await transaction(async () => {
       for (const row of await all('SELECT id FROM shifts WHERE workspace_id=?', workspace)) {
@@ -177,5 +192,5 @@ export function createDomain(store) {
     });
     return bootstrap(workspace);
   }
-  return { bootstrap, list, detail, create, search, message, offer, decision, attendance, cancel, reserve, addReserve, reset };
+  return { bootstrap, list, detail, create, search, message, offer, decision, attendance, cancel, reserve, addReserve, contactOutcome, addContactReserve, reset };
 }

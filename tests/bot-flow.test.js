@@ -7,14 +7,15 @@ import { openStore } from '../server/store.js';
 import { createDomain } from '../server/domain.js';
 import { createChatBot } from '../server/chat-bot.js';
 import { createServer } from '../server/http.js';
+import { createOutboundLink, readOutboundLink } from '../server/outbound-links.js';
 
 const update = (userId, text, mid = `${userId}-${text}`) => ({ update_type: 'message_created', timestamp: Date.now(), message: { sender: { user_id: userId, first_name: userId === 202 ? 'Кандидат' : 'Управляющий', last_name: 'MAX' }, recipient: { chat_type: 'dialog' }, body: { mid, text } } });
 const callback = (userId, payload, id = `${userId}-${payload}`) => ({ update_type: 'message_callback', timestamp: Date.now(), callback: { callback_id: id, payload, user: { user_id: userId, first_name: userId === 202 ? 'Кандидат' : 'Управляющий', last_name: 'MAX' } }, message: { sender: { user_id: 999, is_bot: true }, recipient: { chat_type: 'dialog' } } });
-async function botFixture() {
+async function botFixture(options = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'podmena-chat-'));
   const store = await openStore(join(dir, 'chat.sqlite'));
   const domain = createDomain(store);
-  const bot = createChatBot(store, domain);
+  const bot = createChatBot(store, domain, { makeOutboundLink: details => createOutboundLink('https://app.test', 'test-secret', details), ...options });
   return { dir, store, domain, bot, say: (id, text) => bot.handle(update(id, text)), tap: (id, payload) => bot.handle(callback(id, payload)), close: async () => { await store.db.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
@@ -57,11 +58,13 @@ test('one candidate cannot receive overlapping offers from two managers', async 
 });
 
 test('two MAX chats complete registration, offer and candidate-only confirmation', async () => {
-  const fx = await botFixture();
+  const fx = await botFixture({ enableCandidateMode: true });
   try {
     await fx.say(202, '/candidate');
     await fx.say(202, 'Эспрессо');
     assert.match((await fx.say(202, '5000'))[0].text, /Профиль готов/);
+    assert.match((await fx.tap(202, 'c:link'))[0].text, /ссылку.*MAX/i);
+    assert.match((await fx.say(202, 'https://max.ru/u/candidate-shared-link'))[0].text, /сохранена/);
     await fx.say(101, '/manager');
     const sites = await fx.tap(101, 'm:new');
     assert.match(sites[0].text, /Выберите точку/);
@@ -79,6 +82,7 @@ test('two MAX chats complete registration, offer and candidate-only confirmation
     assert.ok(shiftId);
     const candidates = await fx.tap(101, `m:responses:${shiftId}`);
     const offerButton = candidates.flatMap(x => x.buttons.flat()).find(x => x.payload?.startsWith('m:offer:'));
+    assert.ok(candidates.flatMap(x => x.buttons.flat()).some(x => x.text === 'Написать в MAX' && readOutboundLink(new URL(x.url).searchParams.get('token'), 'test-secret')?.target === 'max'));
     const offered = await fx.tap(101, offerButton.payload);
     assert.equal(offered.length, 2);
     assert.equal(offered[1].userId, 202);
@@ -107,7 +111,9 @@ test('custom requirement, flexible time and modelled external replies are clear 
     const manual = await fx.tap(101, 'm:day:custom');
     assert.match(manual[0].text, /9:00/);
     assert.match((await fx.say(101, '03.10.2030 9:00'))[0].text, /Сколько часов/);
-    await fx.tap(101, 'm:hours:8');
+    const hoursPrompt = await fx.tap(101, 'm:hours:custom');
+    assert.match(hoursPrompt[0].text, /количество часов/i);
+    await fx.say(101, '7');
     await fx.tap(101, 'm:pay:6000');
     const requirement = 'Умеет работать с рожковой кофемашиной и спокойно закрывает кассу';
     assert.match((await fx.say(101, requirement))[0].text, /Кандидат увидит/);
@@ -118,8 +124,86 @@ test('custom requirement, flexible time and modelled external replies are clear 
     assert.ok(arrivals.every(x => x.buttons.flat().every(b => !b.payload?.startsWith('m:offer:'))));
     const shift = await fx.domain.detail('max:101', published.demoShiftId);
     assert.equal(shift.shift.skills[0], requirement);
+    assert.equal((Date.parse(shift.shift.ends_at) - Date.parse(shift.shift.starts_at)) / 3600000, 7);
     assert.ok(shift.messages.some(x => x.modelled));
+    await fx.store.run('UPDATE candidates SET max_profile_url=? WHERE workspace_id=? AND name=?', 'https://max.ru/u/demo-contact', 'max:101', 'София Р.');
+    const cards = await fx.tap(101, `m:responses:${published.demoShiftId}`);
+    const youdo = cards.find(x => x.text.includes('София Р.'));
+    assert.ok(youdo.buttons.flat().some(x => x.text === 'Открыть YouDo' && readOutboundLink(new URL(x.url).searchParams.get('token'), 'test-secret')?.target === 'platform'));
+    assert.ok(youdo.buttons.flat().some(x => x.text === 'Написать в MAX' && readOutboundLink(new URL(x.url).searchParams.get('token'), 'test-secret')?.target === 'max'));
   } finally { await fx.close(); }
+});
+
+test('candidate mode is disabled by default while manager can publish without MAX sourcing', async () => {
+  const fx = await botFixture();
+  try {
+    const start = (await fx.say(202, '/start'))[0];
+    assert.ok(start.buttons.flat().every(x => x.payload !== 'c:home'));
+    assert.match((await fx.say(202, '/candidate'))[0].text, /временно выключен/);
+    assert.match((await fx.tap(202, 'c:home'))[0].text, /временно выключен/);
+    await fx.store.run('UPDATE bot_dialogs SET mode=? WHERE user_id=?', 'candidate', 202);
+    assert.match((await fx.tap(202, 'm:new'))[0].text, /Выберите точку/);
+    await fx.say(101, '/manager');
+    const sites = await fx.tap(101, 'm:new');
+    const site = sites[0].buttons.flat().find(x => x.payload?.startsWith('m:site:') && x.payload !== 'm:site:new');
+    await fx.tap(101, site.payload);
+    await fx.tap(101, 'm:day:1');
+    await fx.tap(101, 'm:time:09:00');
+    await fx.tap(101, 'm:hours:8');
+    await fx.tap(101, 'm:pay:6000');
+    await fx.say(101, 'Эспрессо');
+    const published = (await fx.tap(101, 'm:publish'))[0];
+    assert.ok(published.demoShiftId);
+    const data = await fx.domain.detail('max:101', published.demoShiftId);
+    assert.ok(!data.shift.sources.includes('max'));
+    assert.ok(data.shift.sources.includes('youdo'));
+    assert.match((await fx.tap(101, `m:search:${published.demoShiftId}`))[0].text, /временно выключен/);
+  } finally { await fx.close(); }
+});
+
+test('outbound link redirects and asks the manager; yes offers reserve, no offers other candidates', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'podmena-outbound-'));
+  const path = join(dir, 'outbound.sqlite');
+  const delivered = [];
+  const app = createServer({ databasePath: path, webhookSecret: 'hook-secret', sessionSecret: 'test-secret', publicUrl: 'https://app.test', sendBotMessage: async (userId, payload) => delivered.push({ userId, payload }), answerBotCallback: async () => {} });
+  let seed;
+  try {
+    await new Promise(resolve => app.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${app.address().port}`;
+    assert.equal((await fetch(`${origin}/api/health`)).status, 200);
+    seed = await openStore(path);
+    const domain = createDomain(seed);
+    const workspace = 'max:101';
+    const base = await domain.bootstrap(workspace);
+    const start = Date.now() + 3 * 86400000;
+    const created = await domain.create(workspace, { siteId: base.sites[0].id, role: 'Бариста', startsAt: new Date(start).toISOString(), endsAt: new Date(start + 8 * 3600000).toISOString(), payRub: 6000, skills: ['Эспрессо'], description: '', decisionDeadline: new Date(start - 60000).toISOString(), sources: ['youdo', 'profi'] });
+    await domain.search(workspace, created.shift.id, { sources: ['youdo', 'profi'], modelledReplies: true });
+    const responses = (await domain.detail(workspace, created.shift.id)).responses;
+    const person = responses.find(x => x.source === 'youdo');
+    assert.ok(person);
+    const signed = createOutboundLink('https://app.test', 'test-secret', { managerId: 101, shiftId: created.shift.id, candidateId: person.candidateId, target: 'platform' });
+    const outbound = await fetch(`${origin}${new URL(signed).pathname}${new URL(signed).search}`, { redirect: 'manual' });
+    assert.equal(outbound.status, 302);
+    assert.equal(outbound.headers.get('location'), 'https://youdo.com/');
+    assert.match(delivered.at(-1).payload.text, /Удалось договориться/);
+    assert.deepEqual(delivered.at(-1).payload.attachments[0].payload.buttons[0].map(x => x.text), ['Да', 'Нет']);
+    const post = payload => fetch(`${origin}/api/max/webhook`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-max-bot-api-secret': 'hook-secret' }, body: JSON.stringify(callback(101, payload, `contact-${payload}`)) });
+    assert.equal((await post(`m:contact:yes:${created.shift.id}:${person.candidateId}`)).status, 200);
+    assert.match(delivered.at(-1).payload.text, /Добавить человека в резерв/);
+    assert.equal((await post(`m:contact:reserve:${created.shift.id}:${person.candidateId}`)).status, 200);
+    assert.ok((await domain.reserve(workspace)).some(x => x.id === person.candidateId));
+    const other = responses.find(x => x.candidateId !== person.candidateId);
+    assert.equal((await post(`m:contact:no:${created.shift.id}:${other.candidateId}`)).status, 200);
+    assert.ok(delivered.at(-1).payload.attachments[0].payload.buttons.flat().some(x => x.text === 'Другие кандидаты'));
+    assert.equal((await post(`m:contact:others:${created.shift.id}:${other.candidateId}`)).status, 200);
+    assert.ok(delivered.some(x => x.payload.text.includes(person.name)));
+    const tampered = `${signed}x`;
+    assert.equal((await fetch(`${origin}${new URL(tampered).pathname}${new URL(tampered).search}`, { redirect: 'manual' })).status, 404);
+  } finally {
+    if (seed) await seed.db.close();
+    if (app.listening) await new Promise(resolve => app.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('webhook authenticates, ignores group messages, and retries an undelivered reply once', async () => {

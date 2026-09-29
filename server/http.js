@@ -7,6 +7,7 @@ import { createDomain, AppError } from './domain.js';
 import { createSession, readSession, verifyMaxInitData, verifyWebhookSecret } from './auth.js';
 import { maxApi } from './max-api.js';
 import { createChatBot } from './chat-bot.js';
+import { createOutboundLink, readOutboundLink, maxProfileUrl, platformUrl } from './outbound-links.js';
 import { waitUntil } from '@vercel/functions';
 
 const root = resolve('dist');
@@ -33,15 +34,15 @@ function idFrom(path, suffix = '') { const match = new RegExp(`^/api/shifts/(\\d
 
 export function createServer(config = {}) {
   if (process.env.VERCEL && !process.env.SESSION_SECRET && !config.sessionSecret) throw new Error('Для Vercel требуется SESSION_SECRET');
-  const ready = openStore(config.databasePath || process.env.DATABASE_PATH || './data/podmena.sqlite').then(store => { const domain = createDomain(store); return { store, domain, chatBot: createChatBot(store, domain) }; });
   const botToken = config.botToken || process.env.MAX_BOT_TOKEN;
   const publicUrl = config.publicUrl || process.env.APP_PUBLIC_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '');
   const sessionSecret = config.sessionSecret || process.env.SESSION_SECRET || randomBytes(32).toString('hex');
+  const ready = openStore(config.databasePath || process.env.DATABASE_PATH || './data/podmena.sqlite').then(store => { const domain = createDomain(store); return { store, domain, chatBot: createChatBot(store, domain, { enableCandidateMode: config.enableCandidateMode === true, makeOutboundLink: details => createOutboundLink(publicUrl, sessionSecret, details) }) }; });
   const demoMode = config.demoMode ?? process.env.DEMO_MODE !== '0';
   async function sendBot(userId, text, buttons = []) {
     if (!userId) throw new Error('MAX user_id не задан');
     const payload = { text };
-    if (buttons.length) payload.attachments = [{ type: 'inline_keyboard', payload: { buttons: buttons.map(row => row.map(item => typeof item === 'string' ? ({ type: 'message', text: item }) : ({ type: 'callback', text: item.text, payload: item.payload }))) } }];
+    if (buttons.length) payload.attachments = [{ type: 'inline_keyboard', payload: { buttons: buttons.map(row => row.map(item => typeof item === 'string' ? ({ type: 'message', text: item }) : item.url ? ({ type: 'link', text: item.text, url: item.url }) : ({ type: 'callback', text: item.text, payload: item.payload }))) } }];
     if (config.sendBotMessage) return config.sendBotMessage(userId, payload);
     if (!botToken) throw new Error('MAX_BOT_TOKEN не задан');
     const result = await maxApi(`/messages?user_id=${encodeURIComponent(userId)}`, { token: botToken, method: 'POST', body: payload });
@@ -91,6 +92,25 @@ export function createServer(config = {}) {
       if (method !== 'GET' && req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) throw new AppError(403, 'Недоверенный источник запроса');
       if (path === '/api/health' && method === 'GET') return json(res, 200, { ok: true, database: 'ready' });
       if (path === '/api/config' && method === 'GET') return json(res, 200, { browserDemo: demoMode && (config.browserDemo === true || process.env.ENABLE_BROWSER_DEMO === '1') });
+      if (path === '/api/outbound' && method === 'GET') {
+        const action = readOutboundLink(url.searchParams.get('token'), sessionSecret);
+        if (!action) throw new AppError(404, 'Ссылка недоступна');
+        const workspace = `max:${action.managerId}`;
+        const response = await store.get('SELECT COALESCE(r.contact_source,c.source) AS source,c.max_profile_url AS maxProfileUrl FROM responses r JOIN shifts s ON s.id=r.shift_id JOIN candidates c ON c.id=r.candidate_id WHERE r.shift_id=? AND r.candidate_id=? AND s.workspace_id=? AND c.workspace_id=?', action.shiftId, action.candidateId, workspace, workspace);
+        if (!response) throw new AppError(404, 'Отклик не найден');
+        const target = action.target === 'max' ? maxProfileUrl(response.maxProfileUrl) : platformUrl(response.source);
+        if (!target) throw new AppError(404, 'Ссылка недоступна');
+        const key = `outbound:${action.managerId}:${action.shiftId}:${action.candidateId}`;
+        const message = { userId: action.managerId, text: 'Удалось договориться с кандидатом? Выберите ответ после общения с ним.', buttons: [[{ text: 'Да', payload: `m:contact:yes:${action.shiftId}:${action.candidateId}` }, { text: 'Нет', payload: `m:contact:no:${action.shiftId}:${action.candidateId}` }]] };
+        await store.run('INSERT OR IGNORE INTO bot_outbox(update_key,seq,user_id,payload_json) VALUES (?,?,?,?)', key, 0, action.managerId, JSON.stringify(message));
+        const pending = await store.get('SELECT delivered FROM bot_outbox WHERE update_key=? AND seq=0', key);
+        if (!pending?.delivered) {
+          try { await sendBot(message.userId, message.text, message.buttons); await store.run('UPDATE bot_outbox SET delivered=1 WHERE update_key=? AND seq=0', key); }
+          catch (error) { console.error('Outbound follow-up delivery failed:', error); }
+        }
+        res.writeHead(302, { location: target, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
+        return res.end();
+      }
       if (path === '/api/auth/demo' && method === 'POST') {
         if (!demoMode || (!config.browserDemo && process.env.ENABLE_BROWSER_DEMO !== '1')) throw new AppError(403, 'Вход для браузерной демонстрации выключен');
         const input = await body(req);
