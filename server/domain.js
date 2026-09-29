@@ -1,4 +1,4 @@
-const SOURCES = ['staff', 'reserve', 'youdo', 'profi'];
+const SOURCES = ['staff', 'reserve', 'youdo', 'profi', 'max'];
 const SCENARIOS = ['success', 'no_results', 'decline', 'source_error'];
 const now = () => new Date().toISOString();
 const parse = value => { try { return JSON.parse(value); } catch { return []; } };
@@ -48,15 +48,26 @@ export function createDomain(store) {
     return detail(workspace, result.lastInsertRowid);
   }
   async function hasOverlap(workspace, candidateId, sh) {
+    const candidate = await get('SELECT max_user_id FROM candidates WHERE id=? AND workspace_id=?', candidateId, workspace);
+    if (candidate?.max_user_id) return Boolean(await get(`SELECT 1 FROM offers o JOIN candidates c ON c.id=o.candidate_id WHERE c.max_user_id=? AND o.status IN ('pending','confirmed') AND o.shift_id<>? AND o.starts_at<? AND o.ends_at>? LIMIT 1`, candidate.max_user_id, sh.id, sh.ends_at, sh.starts_at));
     return Boolean(await get(`SELECT 1 FROM offers o JOIN shifts s ON s.id=o.shift_id WHERE s.workspace_id=? AND o.candidate_id=? AND o.status IN ('pending','confirmed') AND s.id<>? AND o.starts_at<? AND o.ends_at>? LIMIT 1`, workspace, candidateId, sh.id, sh.ends_at, sh.starts_at));
+  }
+  async function syncMaxCandidates(workspace) {
+    for (const profile of await all('SELECT * FROM bot_candidate_profiles')) {
+      if (workspace === `max:${profile.user_id}`) continue;
+      await run(`INSERT INTO candidates(workspace_id,name,source,skills,rate_kopecks,experience_years,available,max_user_id) VALUES (?,?,?,?,?,?,?,?)
+        ON CONFLICT(workspace_id,max_user_id) WHERE max_user_id IS NOT NULL DO UPDATE SET name=excluded.name,skills=excluded.skills,rate_kopecks=excluded.rate_kopecks,available=excluded.available`,
+        workspace, profile.name, 'max', JSON.stringify([profile.skill]), profile.rate_kopecks, 0, profile.available, profile.user_id);
+    }
   }
   async function search(workspace, id) {
     const sh = await shift(workspace, id);
     if (!['draft', 'searching', 'unfilled'].includes(sh.status)) conflict('Поиск сейчас недоступен');
+    if (sh.sources.includes('max')) await syncMaxCandidates(workspace);
     await transaction(async () => {
       for (const source of sh.sources) {
         const failed = sh.scenario === 'source_error' && source === 'profi';
-        await run('INSERT INTO publications(shift_id,source,status,detail) VALUES (?,?,?,?) ON CONFLICT(shift_id,source) DO UPDATE SET status=excluded.status,detail=excluded.detail', id, source, failed ? 'failed' : 'sent', failed ? 'Демо: источник временно недоступен' : 'Демо: обращение создано');
+        await run('INSERT INTO publications(shift_id,source,status,detail) VALUES (?,?,?,?) ON CONFLICT(shift_id,source) DO UPDATE SET status=excluded.status,detail=excluded.detail', id, source, failed ? 'failed' : 'sent', source === 'max' ? 'Поиск среди зарегистрированных кандидатов MAX' : failed ? 'Демо: источник временно недоступен' : 'Демо: обращение создано');
         if (failed || sh.scenario === 'no_results') continue;
         const people = source === 'reserve'
           ? await all('SELECT c.* FROM candidates c JOIN reserve r ON r.candidate_id=c.id AND r.workspace_id=c.workspace_id WHERE c.workspace_id=?', workspace)
@@ -64,7 +75,7 @@ export function createDomain(store) {
         for (const person of people) {
           const skills = parse(person.skills);
           if (!person.available || !sh.skills.every(x => skills.includes(x)) || person.rate_kopecks > sh.pay_kopecks || await hasOverlap(workspace, person.id, sh)) continue;
-          const reasons = [`Навыки: ${sh.skills.join(', ')}`, `Ставка ${person.rate_kopecks / 100} ₽ в бюджете`, 'Доступность указана в демо-профиле'];
+          const reasons = [`Навыки: ${sh.skills.join(', ')}`, `Ставка ${person.rate_kopecks / 100} ₽ в бюджете`, source === 'max' ? 'Доступность указана кандидатом в MAX' : 'Доступность указана в демо-профиле'];
           await run('INSERT OR IGNORE INTO responses(shift_id,candidate_id,status,reasons,contact_source) VALUES (?,?,?,?,?)', id, person.id, 'new', JSON.stringify(reasons), source);
         }
       }
@@ -76,6 +87,7 @@ export function createDomain(store) {
   }
   async function message(workspace, id, body) {
     const sh = await shift(workspace, id);
+    if (sh.sources.includes('max')) throw new AppError(403, 'Сообщения кандидату MAX отправляются только через чат бота');
     if (!['searching', 'awaiting_confirmation', 'confirmed'].includes(sh.status)) conflict('Переписка сейчас недоступна');
     const response = await get('SELECT id FROM responses WHERE shift_id=? AND candidate_id=?', id, body?.candidateId);
     if (!response) bad('Выберите кандидата из откликов');
@@ -111,8 +123,8 @@ export function createDomain(store) {
       await run('UPDATE offers SET status=? WHERE id=?', value === 'confirm' ? 'confirmed' : 'declined', current.id);
       await run('UPDATE shifts SET status=? WHERE id=?', value === 'confirm' ? 'confirmed' : 'searching', id);
       await run('UPDATE responses SET status=? WHERE shift_id=? AND candidate_id=?', value === 'confirm' ? 'selected' : 'declined', id, current.candidate_id);
-      if (value === 'confirm') await run("UPDATE publications SET status='closed',detail='Демо: поиск остановлен после подтверждения' WHERE shift_id=? AND status='sent'", id);
-      await event(id, value, value === 'confirm' ? 'Демо: кандидат отдельно подтвердил выход' : 'Демо: кандидат отказался; поиск можно продолжить');
+      if (value === 'confirm') await run("UPDATE publications SET status='closed',detail=? WHERE shift_id=? AND status='sent'", sh.sources.includes('max') ? 'Поиск остановлен после подтверждения' : 'Демо: поиск остановлен после подтверждения', id);
+      await event(id, value, sh.sources.includes('max') ? (value === 'confirm' ? 'Кандидат подтвердил выход в своём чате MAX' : 'Кандидат отказался в своём чате MAX') : (value === 'confirm' ? 'Демо: кандидат отдельно подтвердил выход' : 'Демо: кандидат отказался; поиск можно продолжить'));
     });
     return detail(workspace, id);
   }
@@ -123,7 +135,7 @@ export function createDomain(store) {
     await transaction(async () => {
       if (value === 'no_show') await run("UPDATE offers SET status='cancelled' WHERE shift_id=? AND status='confirmed'", id);
       await run('UPDATE shifts SET status=? WHERE id=?', value === 'arrived' ? 'completed' : 'unfilled', id);
-      await event(id, value, value === 'arrived' ? 'Демо: управляющий отметил фактический выход' : 'Демо: управляющий отметил невыход');
+      await event(id, value, sh.sources.includes('max') ? (value === 'arrived' ? 'Управляющий отметил выход' : 'Управляющий отметил невыход') : (value === 'arrived' ? 'Демо: управляющий отметил фактический выход' : 'Демо: управляющий отметил невыход'));
     });
     return detail(workspace, id);
   }

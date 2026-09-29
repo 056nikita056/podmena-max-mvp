@@ -37,6 +37,9 @@ export async function openStore(path) {
     CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS bot_chats (workspace_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS bot_updates (update_key TEXT PRIMARY KEY, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS bot_dialogs (user_id INTEGER PRIMARY KEY, mode TEXT NOT NULL DEFAULT '', stage TEXT NOT NULL DEFAULT '', draft_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS bot_candidate_profiles (user_id INTEGER PRIMARY KEY, name TEXT NOT NULL, skill TEXT NOT NULL, rate_kopecks INTEGER NOT NULL, available INTEGER NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS bot_outbox (update_key TEXT NOT NULL, seq INTEGER NOT NULL, user_id INTEGER NOT NULL, payload_json TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(update_key,seq));
   `;
   for (const sql of schema.split(';').map(part => part.trim()).filter(Boolean)) await db.execute(sql);
   const txContext = new AsyncLocalStorage();
@@ -55,6 +58,10 @@ export async function openStore(path) {
   if (!(await all('PRAGMA table_info(responses)')).some(column => column.name === 'contact_source')) {
     await db.execute('ALTER TABLE responses ADD COLUMN contact_source TEXT');
   }
+  if (!(await all('PRAGMA table_info(candidates)')).some(column => column.name === 'max_user_id')) {
+    await db.execute('ALTER TABLE candidates ADD COLUMN max_user_id INTEGER');
+  }
+  await db.execute('CREATE UNIQUE INDEX IF NOT EXISTS candidates_workspace_max_user ON candidates(workspace_id,max_user_id) WHERE max_user_id IS NOT NULL');
   async function ensureWorkspace(id) {
     await transaction(async () => {
       if (await get('SELECT id FROM workspaces WHERE id=?', id)) return;
