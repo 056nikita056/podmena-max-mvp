@@ -31,16 +31,16 @@ export function verifyMaxInitData(initData, botToken, current = Date.now()) {
   return `max:${user.id}`;
 }
 
-export function createSession(store, workspace, secret) {
+export async function createSession(store, workspace, secret) {
   const token = randomBytes(32).toString('base64url');
-  store.run('INSERT INTO sessions(token_hash,workspace_id,expires_at) VALUES (?,?,?)', hash(token, secret), workspace, Date.now() + 8 * 3600000);
+  await store.run('INSERT INTO sessions(token_hash,workspace_id,expires_at) VALUES (?,?,?)', hash(token, secret), workspace, Date.now() + 8 * 3600000);
   return token;
 }
 
-export function readSession(store, cookie, secret) {
+export async function readSession(store, cookie, secret) {
   const token = /(?:^|;\s*)podmena_session=([^;]+)/.exec(cookie || '')?.[1];
   if (!token) throw new AppError(401, 'Откройте приложение через MAX');
-  const row = store.get('SELECT workspace_id,expires_at FROM sessions WHERE token_hash=?', hash(token, secret));
+  const row = await store.get('SELECT workspace_id,expires_at FROM sessions WHERE token_hash=?', hash(token, secret));
   if (!row || row.expires_at < Date.now()) throw new AppError(401, 'Сессия истекла');
   return row.workspace_id;
 }

@@ -1,6 +1,7 @@
-import { DatabaseSync } from 'node:sqlite';
+import { createClient } from '@libsql/client';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 
 const people = [
   ['Анна Л.', 'staff', ['Эспрессо', 'Касса', 'Латте-арт'], 5200, 3, 1],
@@ -15,11 +16,13 @@ const people = [
   ['Никита М.', 'profi', ['Эспрессо', 'Касса'], 6200, 5, 1]
 ];
 
-export function openStore(path) {
-  mkdirSync(dirname(path), { recursive: true });
-  const db = new DatabaseSync(path);
-  db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;');
-  db.exec(`
+export async function openStore(path) {
+  const remoteURL = process.env.TURSO_DATABASE_URL;
+  if (process.env.VERCEL && !remoteURL) throw new Error('Для Vercel требуется TURSO_DATABASE_URL');
+  if (!remoteURL) mkdirSync(dirname(path), { recursive: true });
+  if (remoteURL && !process.env.TURSO_AUTH_TOKEN) throw new Error('TURSO_AUTH_TOKEN не задан');
+  const db = createClient({ url: remoteURL || `file:${resolve(path)}`, authToken: process.env.TURSO_AUTH_TOKEN });
+  const schema = `
     CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, timezone TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sites (id INTEGER PRIMARY KEY, workspace_id TEXT NOT NULL, name TEXT NOT NULL, address TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS candidates (id INTEGER PRIMARY KEY, workspace_id TEXT NOT NULL, name TEXT NOT NULL, source TEXT NOT NULL, skills TEXT NOT NULL, rate_kopecks INTEGER NOT NULL, experience_years INTEGER NOT NULL, available INTEGER NOT NULL);
@@ -34,23 +37,33 @@ export function openStore(path) {
     CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS bot_chats (workspace_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS bot_updates (update_key TEXT PRIMARY KEY, created_at TEXT NOT NULL);
-  `);
-  if (!db.prepare('PRAGMA table_info(responses)').all().some(column => column.name === 'contact_source')) {
-    db.exec('ALTER TABLE responses ADD COLUMN contact_source TEXT');
+  `;
+  for (const sql of schema.split(';').map(part => part.trim()).filter(Boolean)) await db.execute(sql);
+  const txContext = new AsyncLocalStorage();
+  const execute = (sql, args) => (txContext.getStore() || db).execute({ sql, args });
+  const get = async (sql, ...args) => (await execute(sql, args)).rows[0];
+  const all = async (sql, ...args) => (await execute(sql, args)).rows;
+  const run = async (sql, ...args) => {
+    const result = await execute(sql, args);
+    return { lastInsertRowid: result.lastInsertRowid == null ? null : Number(result.lastInsertRowid), changes: result.rowsAffected };
+  };
+  const transaction = async fn => {
+    const tx = await db.transaction('write');
+    try { const result = await txContext.run(tx, fn); await tx.commit(); return result; }
+    catch (error) { await tx.rollback(); throw error; }
+  };
+  if (!(await all('PRAGMA table_info(responses)')).some(column => column.name === 'contact_source')) {
+    await db.execute('ALTER TABLE responses ADD COLUMN contact_source TEXT');
   }
-  const get = (sql, ...args) => db.prepare(sql).get(...args);
-  const all = (sql, ...args) => db.prepare(sql).all(...args);
-  const run = (sql, ...args) => db.prepare(sql).run(...args);
-  const transaction = fn => { db.exec('BEGIN IMMEDIATE'); try { const result = fn(); db.exec('COMMIT'); return result; } catch (error) { db.exec('ROLLBACK'); throw error; } };
-  function ensureWorkspace(id) {
-    if (get('SELECT id FROM workspaces WHERE id=?', id)) return;
-    transaction(() => {
-      run('INSERT INTO workspaces VALUES (?,?,?)', id, 'Кофейни «Смена»', 'Europe/Moscow');
-      run('INSERT INTO sites(workspace_id,name,address) VALUES (?,?,?)', id, 'Точка на Покровке', 'Москва, ул. Покровка, 18');
-      run('INSERT INTO sites(workspace_id,name,address) VALUES (?,?,?)', id, 'Точка на Бауманской', 'Москва, Бауманская ул., 12');
+  async function ensureWorkspace(id) {
+    await transaction(async () => {
+      if (await get('SELECT id FROM workspaces WHERE id=?', id)) return;
+      await run('INSERT INTO workspaces VALUES (?,?,?)', id, 'Кофейни «Смена»', 'Europe/Moscow');
+      await run('INSERT INTO sites(workspace_id,name,address) VALUES (?,?,?)', id, 'Точка на Покровке', 'Москва, ул. Покровка, 18');
+      await run('INSERT INTO sites(workspace_id,name,address) VALUES (?,?,?)', id, 'Точка на Бауманской', 'Москва, Бауманская ул., 12');
       for (const p of people) {
-        const result = run('INSERT INTO candidates(workspace_id,name,source,skills,rate_kopecks,experience_years,available) VALUES (?,?,?,?,?,?,?)', id, p[0], p[1], JSON.stringify(p[2]), p[3] * 100, p[4], p[5]);
-        if (p[1] === 'reserve') run('INSERT INTO reserve(workspace_id,candidate_id) VALUES (?,?)', id, result.lastInsertRowid);
+        const result = await run('INSERT INTO candidates(workspace_id,name,source,skills,rate_kopecks,experience_years,available) VALUES (?,?,?,?,?,?,?)', id, p[0], p[1], JSON.stringify(p[2]), p[3] * 100, p[4], p[5]);
+        if (p[1] === 'reserve') await run('INSERT INTO reserve(workspace_id,candidate_id) VALUES (?,?)', id, result.lastInsertRowid);
       }
     });
   }

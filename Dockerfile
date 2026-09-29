@@ -10,6 +10,7 @@ ENV NODE_ENV=production PORT=3000 DATABASE_PATH=/data/podmena.sqlite
 WORKDIR /app
 COPY --from=build /app/dist ./dist
 COPY server ./server
+COPY certs ./certs
 COPY package.json ./package.json
 RUN mkdir -p /data && chown -R node:node /data /app
 USER node
