@@ -9,7 +9,7 @@ import { createChatBot } from '../server/chat-bot.js';
 import { createServer } from '../server/http.js';
 
 const update = (userId, text, mid = `${userId}-${text}`) => ({ update_type: 'message_created', timestamp: Date.now(), message: { sender: { user_id: userId, first_name: userId === 202 ? 'Кандидат' : 'Управляющий', last_name: 'MAX' }, recipient: { chat_type: 'dialog' }, body: { mid, text } } });
-const callback = (userId, payload, id = `${userId}-${payload}`) => ({ update_type: 'message_callback', timestamp: Date.now(), callback: { callback_id: id, payload, user: { user_id: userId, first_name: userId === 202 ? 'Кандидат' : 'Управляющий', last_name: 'MAX' } }, message: { recipient: { chat_type: 'dialog' } } });
+const callback = (userId, payload, id = `${userId}-${payload}`) => ({ update_type: 'message_callback', timestamp: Date.now(), callback: { callback_id: id, payload, user: { user_id: userId, first_name: userId === 202 ? 'Кандидат' : 'Управляющий', last_name: 'MAX' } }, message: { sender: { user_id: 999, is_bot: true }, recipient: { chat_type: 'dialog' } } });
 async function botFixture() {
   const dir = mkdtempSync(join(tmpdir(), 'podmena-chat-'));
   const store = await openStore(join(dir, 'chat.sqlite'));
@@ -127,7 +127,7 @@ test('webhook authenticates, ignores group messages, and retries an undelivered 
   const delivered = [];
   const answered = [];
   let fail = true;
-  const app = createServer({ databasePath: join(dir, 'hook.sqlite'), webhookSecret: 'hook-secret', sessionSecret: 'session-secret', answerBotCallback: async id => answered.push(id), sendBotMessage: async (userId, payload) => {
+  const app = createServer({ databasePath: join(dir, 'hook.sqlite'), webhookSecret: 'hook-secret', sessionSecret: 'session-secret', answerBotCallback: async (id, body) => answered.push({ id, body }), sendBotMessage: async (userId, payload) => {
     if (fail) { fail = false; throw new Error('delivery unavailable'); }
     delivered.push({ userId, payload });
   } });
@@ -145,7 +145,8 @@ test('webhook authenticates, ignores group messages, and retries an undelivered 
     assert.deepEqual(delivered[0].payload.attachments[0].payload.buttons[0][0], { type: 'callback', text: 'Найти подмену', payload: 'm:new' });
     assert.equal((await post(callback(101, 'm:home', 'callback-1'), 'hook-secret')).status, 200);
     assert.equal(delivered.length, 2);
-    assert.deepEqual(answered, ['callback-1']);
+    assert.match(delivered[1].payload.text, /Что хотите сделать/);
+    assert.deepEqual(answered, [{ id: 'callback-1', body: { notification: 'Готово' } }]);
     const group = update(101, '/start', 'unique-2');
     group.message.recipient.chat_type = 'chat';
     assert.equal((await post(group, 'hook-secret')).status, 200);

@@ -50,9 +50,10 @@ export function createServer(config = {}) {
   }
   async function answerCallback(callbackId) {
     if (!callbackId) return;
-    if (config.answerBotCallback) return config.answerBotCallback(callbackId);
+    const answer = { notification: 'Готово' };
+    if (config.answerBotCallback) return config.answerBotCallback(callbackId, answer);
     if (!botToken) return;
-    const response = await maxApi(`/answers?callback_id=${encodeURIComponent(callbackId)}`, { token: botToken, method: 'POST', body: {} });
+    const response = await maxApi(`/answers?callback_id=${encodeURIComponent(callbackId)}`, { token: botToken, method: 'POST', body: answer });
     if (!response.ok || response.data?.success === false) console.error(`MAX callback acknowledgment failed: HTTP ${response.status}`);
   }
   const demoDelayMs = config.demoDelayMs ?? 10000;

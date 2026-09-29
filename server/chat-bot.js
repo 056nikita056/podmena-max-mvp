@@ -68,7 +68,7 @@ export function createChatBot(store, domain) {
   async function handle(update) {
     if (!['bot_started', 'message_created', 'message_callback'].includes(update?.update_type)) return [];
     if (update.update_type !== 'bot_started' && update.message?.recipient?.chat_type && update.message.recipient.chat_type !== 'dialog') return [];
-    if (update.message?.sender?.is_bot) return [];
+    if (update.update_type === 'message_created' && update.message?.sender?.is_bot) return [];
     const actor = update.update_type === 'bot_started' ? update.user : update.update_type === 'message_callback' ? (update.callback?.user || update.user) : update.message?.sender;
     const userId = Number(actor?.user_id);
     if (!Number.isSafeInteger(userId) || userId <= 0) return [];
