@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+data/
+output/private/
+private/
+*.sqlite
+*.sqlite-*
+.DS_Store

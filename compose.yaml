@@ -1,0 +1,19 @@
+services:
+  podmena:
+    build: .
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      PORT: "3000"
+      DATABASE_PATH: "/data/podmena.sqlite"
+      APP_PUBLIC_URL: "${APP_PUBLIC_URL:-http://localhost:3000}"
+      MAX_BOT_TOKEN: "${MAX_BOT_TOKEN:-}"
+      MAX_WEBHOOK_SECRET: "${MAX_WEBHOOK_SECRET:-}"
+      SESSION_SECRET: "${SESSION_SECRET:-}"
+      DEMO_MODE: "${DEMO_MODE:-1}"
+      ENABLE_BROWSER_DEMO: "${ENABLE_BROWSER_DEMO:-0}"
+    volumes:
+      - podmena_data:/data
+    restart: unless-stopped
+volumes:
+  podmena_data:

@@ -1,0 +1,10 @@
+.git
+.env
+node_modules
+dist
+data
+docs/screenshots
+output
+private
+*.sqlite
+*.sqlite-*
