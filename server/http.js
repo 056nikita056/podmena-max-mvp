@@ -37,7 +37,7 @@ export function createServer(config = {}) {
   const botToken = config.botToken || process.env.MAX_BOT_TOKEN;
   const publicUrl = config.publicUrl || process.env.APP_PUBLIC_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '');
   const sessionSecret = config.sessionSecret || process.env.SESSION_SECRET || randomBytes(32).toString('hex');
-  const ready = openStore(config.databasePath || process.env.DATABASE_PATH || './data/podmena.sqlite').then(store => { const domain = createDomain(store); return { store, domain, chatBot: createChatBot(store, domain, { enableCandidateMode: config.enableCandidateMode === true, inviteSecret: sessionSecret, botToken, botUsername: config.botUsername || process.env.MAX_BOT_USERNAME || 't405_hakaton_max_bot', makeOutboundLink: details => createOutboundLink(publicUrl, sessionSecret, details) }) }; });
+  const ready = openStore(config.databasePath || process.env.DATABASE_PATH || './data/podmena.sqlite').then(store => { const domain = createDomain(store); return { store, domain, chatBot: createChatBot(store, domain, { enableCandidateMode: config.enableCandidateMode === true, inviteSecret: config.inviteSecret || process.env.RESERVE_INVITE_SECRET || sessionSecret, botToken, botUsername: config.botUsername || process.env.MAX_BOT_USERNAME || 't405_hakaton_max_bot', makeOutboundLink: details => createOutboundLink(publicUrl, sessionSecret, details) }) }; });
   const demoMode = config.demoMode ?? process.env.DEMO_MODE !== '0';
   async function sendBot(userId, text, buttons = []) {
     if (!userId) throw new Error('MAX user_id не задан');
