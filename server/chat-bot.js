@@ -1,10 +1,12 @@
 import { AppError } from './domain.js';
+import { randomBytes } from 'node:crypto';
 import { maxProfileUrl, platformUrl } from './outbound-links.js';
+import { createReserveService } from './reserve-service.js';
 
 const button = (text, payload) => ({ text, payload });
 const link = (text, url) => ({ text, url });
 const send = (userId, text, buttons = [], extra = {}) => ({ userId, text, buttons, ...extra });
-const home = [[button('Найти подмену', 'm:new')], [button('Мои смены', 'm:list')]];
+const home = [[button('Найти подмену', 'm:new')], [button('Мои смены', 'm:list')], [button('Резерв', 'm:reserve:home')]];
 const candidateHome = [[button('Мои предложения', 'c:offers'), button('Мой профиль', 'c:profile')], [button('Поиск: вкл / выкл', 'c:toggle')], [button('Я управляющий', 'm:home')]];
 const dateText = value => new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(value));
 const shortDate = value => new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }).format(new Date(value));
@@ -33,11 +35,18 @@ function timeButtons() {
 }
 function shiftButton(id, label = 'Открыть смену') { return button(label, `m:shift:${id}`); }
 function sourceName(source) { return source === 'youdo' ? 'YouDo' : source === 'profi' ? 'Профи.ру' : source === 'max' ? 'MAX' : source === 'staff' ? 'Сотрудники' : 'Резерв'; }
+const descriptionPrompt = 'Описание смены: напишите его своими словами. Можно указать задачи, нужный опыт, оборудование, график и условия. Например: «Бариста на утро: готовить напитки, работать с кассой, закрыть смену». Этот текст будет показан в предложении сотруднику резерва.';
+const cleanEdit = draft => { const { editField, editOriginal, ...rest } = draft; return rest; };
+const editButtons = draft => draft.editOriginal ? [[button('К проверке', 'm:review')]] : [];
+function reviewCard(userId, draft) {
+  return send(userId, `Проверьте смену\n\n${draft.siteName}, ${draft.siteAddress}\n${shortDate(draft.startsAt)} · ${draft.hours} ч · ${draft.payRub.toLocaleString('ru-RU')} ₽\n\nОписание: «${draft.description}»\n\nСначала сообщим сотрудникам резерва и посмотрим учебные профили команды. Затем покажем тестовые отклики YouDo и Профи.ру.`, [[button('Опубликовать смену', 'm:publish')], [button('Изменить точку', 'm:edit:site'), button('Дату и время', 'm:edit:datetime')], [button('Длительность', 'm:edit:hours'), button('Оплату', 'm:edit:pay')], [button('Описание', 'm:edit:description')], [button('Отмена', 'm:home')]]);
+}
 
 export function createChatBot(store, domain, options = {}) {
   const candidateMode = options.enableCandidateMode === true;
   const makeOutboundLink = options.makeOutboundLink || (() => null);
   const { get, all, run } = store;
+  const reserveService = createReserveService(store, domain, { inviteSecret: options.inviteSecret || randomBytes(32).toString('hex'), botToken: options.botToken, botUsername: options.botUsername });
   async function state(userId) {
     await run("INSERT OR IGNORE INTO bot_dialogs(user_id,mode,stage,draft_json,updated_at) VALUES (?,?,?,?,?)", userId, '', '', '{}', new Date().toISOString());
     return get('SELECT * FROM bot_dialogs WHERE user_id=?', userId);
@@ -48,16 +57,18 @@ export function createChatBot(store, domain, options = {}) {
   async function card(workspace, id) {
     const data = await domain.detail(workspace, id);
     const sh = data.shift;
-    const lines = [`${sh.site_name} · ${statusText[sh.status] || sh.status}`, sh.site_address, `${shortDate(sh.starts_at)} · ${Math.round((Date.parse(sh.ends_at) - Date.parse(sh.starts_at)) / 3600000)} ч · ${sh.payRub.toLocaleString('ru-RU')} ₽`, `Важно для кандидата: ${sh.skills.join(', ')}`];
+    const lines = [`${sh.site_name} · ${statusText[sh.status] || sh.status}`, sh.site_address, `${shortDate(sh.starts_at)} · ${Math.round((Date.parse(sh.ends_at) - Date.parse(sh.starts_at)) / 3600000)} ч · ${sh.payRub.toLocaleString('ru-RU')} ₽`, `Описание: ${sh.description || sh.skills.join(', ')}`];
     if (data.offer) lines.push(`Кандидат: ${data.offer.name}`);
     const demo = data.publications.filter(x => ['youdo', 'profi'].includes(x.source));
     if (demo.length) lines.push(`Площадки: ${demo.map(x => `${sourceName(x.source)} (демо)`).join(', ')}`);
     return { data, text: lines.join('\n') };
   }
   function responseCard(userId, shiftId, response, data) {
-    const modelled = response.source !== 'max';
+    const modelled = !response.maxUserId;
     const reply = data.messages.find(x => x.candidateId === response.candidateId && x.sender === 'candidate');
-    const lines = [`${response.name} · ${sourceName(response.source)}${modelled ? ' (демо)' : ''}`, `${response.experienceYears} года опыта · ${response.rateRub.toLocaleString('ru-RU')} ₽`, `В профиле: ${response.skills.join(', ')}`];
+    const lines = [`${response.name} · ${sourceName(response.source)}${modelled ? ' (демо)' : ' · MAX'}`];
+    if (response.rateRub > 0) lines.push(`${response.experienceYears} года опыта · ${response.rateRub.toLocaleString('ru-RU')} ₽`);
+    if (response.skills.length) lines.push(`В профиле: ${response.skills.join(', ')}`);
     if (reply) lines.push(`«${reply.text}»`);
     else if (response.source === 'max') lines.push('Зарегистрирован в MAX. Требование к навыку увидит в предложении.');
     if (modelled) lines.push('Тестовый профиль: реальное сообщение человеку не отправлялось.');
@@ -77,9 +88,9 @@ export function createChatBot(store, domain, options = {}) {
   }
   async function showResponses(userId, workspace, id, sourceFilter = null, excludeCandidateId = null) {
     const data = await domain.detail(workspace, id);
-    const responses = data.responses.filter(x => x.status === 'new' && (candidateMode || x.source !== 'max') && (!sourceFilter || sourceFilter.includes(x.source)) && x.candidateId !== excludeCandidateId).slice(0, 5);
+    const responses = data.responses.filter(x => x.status === 'new' && (candidateMode || x.source !== 'max') && (!sourceFilter || sourceFilter.includes(x.source)) && x.candidateId !== excludeCandidateId).sort((a, b) => Number(Boolean(b.maxUserId)) - Number(Boolean(a.maxUserId)) || b.id - a.id).slice(0, 5);
     if (!responses.length) return [send(userId, excludeCandidateId ? 'Других откликов пока нет.' : 'Новых откликов пока нет. Поиск продолжается.', [[shiftButton(id)], [button('Меню', 'm:home')]])];
-    return [send(userId, `Новые отклики по смене «${data.shift.site_name}». Требование к навыку кандидат видит до ответа.`, [[shiftButton(id)], [button('Меню', 'm:home')]]), ...responses.map(x => responseCard(userId, id, x, data))];
+    return [send(userId, `Новые отклики по смене «${data.shift.site_name}». Описание смены: ${data.shift.description || data.shift.skills.join(', ')}.`, [[shiftButton(id)], [button('Меню', 'm:home')]]), ...responses.map(x => responseCard(userId, id, x, data))];
   }
   async function handle(update) {
     if (!['bot_started', 'message_created', 'message_callback'].includes(update?.update_type)) return [];
@@ -88,24 +99,67 @@ export function createChatBot(store, domain, options = {}) {
     const actor = update.update_type === 'bot_started' ? update.user : update.update_type === 'message_callback' ? (update.callback?.user || update.user) : update.message?.sender;
     const userId = Number(actor?.user_id);
     if (!Number.isSafeInteger(userId) || userId <= 0) return [];
-    const raw = update.update_type === 'bot_started' ? '/start' : update.update_type === 'message_callback' ? update.callback?.payload : update.message?.body?.text;
+    const raw = update.update_type === 'bot_started' ? (update.payload?.startsWith('reserve_') ? `r:invite:${update.payload}` : '/start') : update.update_type === 'message_callback' ? update.callback?.payload : update.message?.body?.text || (update.message?.body?.attachments?.some(x => x.type === 'contact') ? 'r:contact' : '');
     if (typeof raw !== 'string' || !raw.trim()) return [];
     const input = raw.trim();
     const current = await state(userId);
     const workspace = `max:${userId}`;
     try {
+      if (input.startsWith('r:') || current.mode === 'reserve_member' || input === '/reserve-inbox') return await reserveMember(userId, actor, input, current, update);
       if (input === '/start' || input === '/help' || input === 'Помощь') return [send(userId, 'Подмена\n\nРазместите смену и получите отклики. YouDo и Профи.ру сейчас работают как демонстрация.', candidateMode ? [...home, [button('Я кандидат', 'c:home')]] : home)];
       if (['/manager', 'Я управляющий', 'm:home', 'Меню'].includes(input)) { await domain.bootstrap(workspace); await save(userId, 'manager'); return [send(userId, 'Что хотите сделать?', home)]; }
       if (!candidateMode && (['/candidate', 'Я кандидат'].includes(input) || input.startsWith('c:') || (current.mode === 'candidate' && !input.startsWith('m:')))) { await save(userId, 'manager'); return [send(userId, 'Режим кандидата временно выключен. Сейчас доступен сценарий управляющего.', home)]; }
-      if (['/candidate', 'Я кандидат', 'c:home'].includes(input)) return candidateHomeView(userId);
+      if (['/candidate', 'Я кандидат', 'c:home'].includes(input)) return await candidateHomeView(userId);
       if (input === '/cancel' || input === 'Отмена') { await save(userId, current.mode); return [send(userId, 'Действие отменено.', current.mode === 'candidate' ? candidateHome : home)]; }
-      if (candidateMode && (current.mode === 'candidate' || input.startsWith('c:'))) return candidate(userId, actor, input, current);
-      if (current.mode === 'manager' || input.startsWith('m:')) return manager(userId, workspace, input, current);
+      if (candidateMode && (current.mode === 'candidate' || input.startsWith('c:'))) return await candidate(userId, actor, input, current);
+      if (current.mode === 'manager' || input.startsWith('m:')) return await manager(userId, workspace, input, current);
       return [send(userId, 'Выберите действие.', candidateMode ? [...home, [button('Я кандидат', 'c:home')]] : home)];
     } catch (error) {
       if (!(error instanceof AppError)) throw error;
       return [send(userId, error.message, [[button('Меню', current.mode === 'candidate' ? 'c:home' : 'm:home')]])];
     }
+  }
+  async function reserveMember(userId, actor, input, current, update) {
+    const draft = parseDraft(current.draft_json);
+    if (input.startsWith('r:invite:')) {
+      const invitation = await reserveService.beginInvite(input.slice(9), actor);
+      await save(userId, 'reserve_member', invitation.needsContact ? 'reserve_contact' : 'reserve_confirm', { inviteId: invitation.id, verified: !invitation.needsContact, username: actor?.username || null, firstName: actor?.first_name || null, lastName: actor?.last_name || null });
+      return invitation.needsContact
+        ? [send(userId, 'Вас пригласили в резерв. Чтобы подтвердить, что приглашение адресовано вам, поделитесь своим номером кнопкой MAX. После этого вы сможете получать смены и отвечать в этом чате.', [[{ text: 'Поделиться своим контактом', type: 'request_contact' }], [button('Отмена', 'r:home')]])]
+        : [send(userId, 'Вас пригласили в резерв. Принять приглашение и получать смены в этом чате?', [[button('Принять приглашение', `r:join:${invitation.id}`)], [button('Отмена', 'r:home')]])];
+    }
+    if (input === 'r:contact' && current.stage === 'reserve_contact') {
+      if (!await reserveService.checkContact(draft.inviteId, update.message?.body)) return [send(userId, 'Номер не совпадает с приглашением или контакт не подтверждён MAX. Нажмите кнопку и поделитесь своим контактом.', [[{ text: 'Поделиться своим контактом', type: 'request_contact' }]])];
+      await save(userId, 'reserve_member', 'reserve_confirm', { ...draft, verified: true });
+      return [send(userId, 'Номер подтверждён. Принять приглашение в резерв?', [[button('Принять приглашение', `r:join:${draft.inviteId}`)], [button('Отмена', 'r:home')]])];
+    }
+    const join = /^r:join:(\d+)$/.exec(input);
+    if (join) {
+      if (current.stage !== 'reserve_confirm' || Number(join[1]) !== draft.inviteId) return [send(userId, 'Приглашение недоступно. Откройте свою ссылку ещё раз.')];
+      const result = await reserveService.joinInvite(draft.inviteId, { ...actor, username: actor?.username || draft.username, first_name: draft.firstName || actor?.first_name, last_name: draft.lastName || actor?.last_name }, draft.verified);
+      await save(userId, 'reserve_member');
+      return [send(userId, 'Вы в резерве. Новые смены будут приходить сюда; на каждую можно откликнуться или отказаться.', [[button('Мои приглашения', 'r:home')]]), send(result.managerId, `${result.name} присоединился(ась) к вашему резерву MAX. Теперь человек получит следующую рассылку смен.`, [[button('Резерв', 'm:reserve:home')]])];
+    }
+    const reply = /^r:reply:(\d+):(\d+):(yes|no)$/.exec(input);
+    if (reply) {
+      const result = await reserveService.reply(Number(reply[1]), Number(reply[2]), userId, reply[3]);
+      return result.accepted
+        ? [send(userId, 'Вы откликнулись. Управляющий получил ваш ответ и может связаться с вами.', [[button('Мои приглашения', 'r:home')]]), send(result.managerId, `${result.name} откликнулся(ась) на смену в MAX.`, [[button('Посмотреть отклик', `m:responses:${Number(reply[2])}`)]])]
+        : [send(userId, 'Ответ сохранён: вы не можете выйти на эту смену.', [[button('Мои приглашения', 'r:home')]])];
+    }
+    if (input === 'r:home' || input === '/reserve-inbox') {
+      await save(userId, 'reserve_member');
+      const pending = await reserveService.pending(userId);
+      if (!pending.length) return [send(userId, 'Ожидающих приглашений на смены сейчас нет.', [[button('Меню управляющего', 'm:home')]])];
+      const result = [];
+      for (const item of pending) {
+        const data = await domain.detail(item.workspace, item.shiftId);
+        result.push(send(userId, `${data.shift.site_name}, ${data.shift.site_address}\n${shortDate(data.shift.starts_at)} · ${Math.round((Date.parse(data.shift.ends_at) - Date.parse(data.shift.starts_at)) / 3600000)} ч\n${data.shift.payRub.toLocaleString('ru-RU')} ₽\n${data.shift.description}`, [[button('Откликнуться', `r:reply:${Number(item.workspace.slice(4))}:${item.shiftId}:yes`), button('Не могу', `r:reply:${Number(item.workspace.slice(4))}:${item.shiftId}:no`)] ]));
+      }
+      return result;
+    }
+    if (input.startsWith('m:') || input === '/manager') { await save(userId, 'manager'); return manager(userId, `max:${userId}`, input, await state(userId)); }
+    return [send(userId, 'Откройте приглашения резерва или меню управляющего.', [[button('Мои приглашения', 'r:home')], [button('Меню управляющего', 'm:home')]])];
   }
   async function candidateHomeView(userId) {
     const profile = await get('SELECT * FROM bot_candidate_profiles WHERE user_id=?', userId);
@@ -166,6 +220,21 @@ export function createChatBot(store, domain, options = {}) {
   }
   async function manager(userId, workspace, input, current) {
     const draft = parseDraft(current.draft_json);
+    if (input === 'm:reserve:home') {
+      await domain.bootstrap(workspace);
+      await save(userId, 'manager');
+      const list = await reserveService.list(workspace);
+      const people = list.people.map(x => `${x.name}${x.userId ? ' · подключён к MAX' : ' · учебный профиль'}`);
+      const pending = list.pending.map(x => `${x.display} · ждём подтверждения`);
+      return [send(userId, `Резерв\n\n${[...people, ...pending].length ? [...people, ...pending].join('\n') : 'Пока никого нет.'}\n\nЧтобы сотрудник получал смены, пригласите его по username или номеру. Он должен открыть ссылку и подтвердить участие.`, [[button('Добавить человека', 'm:reserve:add')], [button('Меню', 'm:home')]])];
+    }
+    if (input === 'm:reserve:add') { await save(userId, 'manager', 'manager_reserve_contact'); return [send(userId, 'Напишите username MAX (@name) или номер телефона сотрудника. Я создам приглашение, которое нужно отправить ему. После подтверждения он будет получать смены здесь.', [[button('Резерв', 'm:reserve:home')]])]; }
+    if (current.stage === 'manager_reserve_contact') {
+      const invite = await reserveService.createInvite(workspace, input);
+      await save(userId, 'manager');
+      const shareUrl = `https://max.ru/:share?text=${encodeURIComponent(`Приглашение в резерв: ${invite.url}`)}`;
+      return [send(userId, `Приглашение для ${invite.display} создано. Отправьте человеку эту ссылку:\n${invite.url}\n\nСотрудник откроет бота, подтвердит свой username или номер и нажмёт «Принять приглашение». После этого ему будут приходить новые смены.`, [[link('Отправить через MAX', shareUrl)], [button('Резерв', 'm:reserve:home')], [button('Меню', 'm:home')]])];
+    }
     if (input === 'm:new' || input === 'Создать смену') {
       const base = await domain.bootstrap(workspace);
       await save(userId, 'manager', 'manager_site');
@@ -227,7 +296,7 @@ export function createChatBot(store, domain, options = {}) {
       if (!profile?.available) return [send(userId, 'Кандидат приостановил поиск.', [[shiftButton(id)]])];
       const result = await domain.offer(workspace, id, candidateId);
       const sh = result.shift;
-      return [send(userId, `Предложение отправлено ${result.offer.name}. Ожидаем решение в отдельном чате кандидата.`, [[shiftButton(id)]]), send(candidate.max_user_id, `Вам предложили смену:\n${sh.site_name}, ${sh.site_address}\n${shortDate(sh.starts_at)} · ${Math.round((Date.parse(sh.ends_at) - Date.parse(sh.starts_at)) / 3600000)} ч\nОплата ${sh.payRub.toLocaleString('ru-RU')} ₽\nОбязательное требование управляющего: ${sh.skills.join(', ')}\n\nПодтвердите выход только если можете выполнить это требование.`, [[button('Принять', `c:accept:${id}`), button('Отказаться', `c:decline:${id}`)]])];
+      return [send(userId, `Предложение отправлено ${result.offer.name}. Ожидаем решение в отдельном чате кандидата.`, [[shiftButton(id)]]), send(candidate.max_user_id, `Вам предложили смену:\n${sh.site_name}, ${sh.site_address}\n${shortDate(sh.starts_at)} · ${Math.round((Date.parse(sh.ends_at) - Date.parse(sh.starts_at)) / 3600000)} ч\nОплата ${sh.payRub.toLocaleString('ru-RU')} ₽\nОписание: ${sh.description || sh.skills.join(', ')}\n\nПодтвердите выход, если условия подходят.`, [[button('Принять', `c:accept:${id}`), button('Отказаться', `c:decline:${id}`)]])];
     }
     const attendance = /^m:attendance:(\d+):(arrived|no_show)$/.exec(input);
     if (attendance) { await domain.attendance(workspace, Number(attendance[1]), attendance[2]); return [send(userId, attendance[2] === 'arrived' ? 'Выход отмечен.' : 'Невыход отмечен.', [[shiftButton(Number(attendance[1]))], [button('Меню', 'm:home')]])]; }
@@ -239,23 +308,43 @@ export function createChatBot(store, domain, options = {}) {
       const candidate = data.offer?.status === 'pending' || data.offer?.status === 'confirmed' ? await get('SELECT max_user_id FROM candidates WHERE id=?', data.offer.candidateId) : null;
       return [send(userId, 'Смена отменена.', [[button('Меню', 'm:home')]]), ...(candidateMode && candidate?.max_user_id ? [send(candidate.max_user_id, 'Управляющий отменил предложенную вам смену.')] : [])];
     }
+    if (input === 'm:review' && draft.editOriginal) { await save(userId, 'manager', 'manager_review', draft.editOriginal); return [reviewCard(userId, draft.editOriginal)]; }
+    const editing = /^m:edit:(site|datetime|hours|pay|description)$/.exec(input);
+    if (current.stage === 'manager_review' && editing) {
+      const field = editing[1];
+      const next = { ...draft, editField: field, editOriginal: draft };
+      const stage = { site: 'manager_site', datetime: 'manager_date', hours: 'manager_hours', pay: 'manager_pay', description: 'manager_description' }[field];
+      await save(userId, 'manager', stage, next);
+      if (field === 'site') {
+        const base = await domain.bootstrap(workspace);
+        return [send(userId, 'Выберите другую точку или добавьте новую.', [...base.sites.slice(0, 6).map(x => [button(x.name, `m:site:${x.id}`)]), [button('Новая точка', 'm:site:new')], ...editButtons(next)])];
+      }
+      if (field === 'datetime') return [send(userId, 'Выберите новую дату или напишите дату и время по Москве.', [...dateButtons(), ...editButtons(next)])];
+      if (field === 'hours') return [send(userId, 'Сколько часов длится смена?', [[button('4 часа', 'm:hours:4'), button('6 часов', 'm:hours:6'), button('8 часов', 'm:hours:8')], [button('12 часов', 'm:hours:12'), button('Своё число', 'm:hours:custom')], ...editButtons(next)])];
+      if (field === 'pay') return [send(userId, 'Оплата за всю смену?', [[button('4 000 ₽', 'm:pay:4000'), button('5 000 ₽', 'm:pay:5000'), button('6 000 ₽', 'm:pay:6000')], [button('Другая сумма', 'm:pay:custom')], ...editButtons(next)])];
+      return [send(userId, descriptionPrompt, editButtons(next))];
+    }
     if (current.stage === 'manager_site') {
-      if (input === 'm:site:new') { await save(userId, 'manager', 'manager_site_name'); return [send(userId, 'Напишите название новой точки.', [[button('Меню', 'm:home')]])]; }
+      if (input === 'm:site:new') { await save(userId, 'manager', 'manager_site_name', draft); return [send(userId, 'Напишите название новой точки.', [...editButtons(draft), [button('Меню', 'm:home')]])]; }
       const selected = /^m:site:(\d+)$/.exec(input);
       if (!selected) return [send(userId, 'Выберите точку кнопкой.', [[button('Назад', 'm:new')]])];
       const site = await get('SELECT id,name,address FROM sites WHERE id=? AND workspace_id=?', Number(selected[1]), workspace);
       if (!site) return [send(userId, 'Точка не найдена.', [[button('Назад', 'm:new')]])];
-      await save(userId, 'manager', 'manager_date', { siteId: site.id, siteName: site.name, siteAddress: site.address });
+      const next = { ...draft, siteId: site.id, siteName: site.name, siteAddress: site.address };
+      if (draft.editOriginal) { const clean = cleanEdit(next); await save(userId, 'manager', 'manager_review', clean); return [reviewCard(userId, clean)]; }
+      await save(userId, 'manager', 'manager_date', next);
       return [send(userId, `${site.name} · ${site.address}\nКогда нужна подмена?`, dateButtons())];
     }
     if (current.stage === 'manager_site_name') {
       if (input.length < 2 || input.length > 80) return [send(userId, 'Название точки: от 2 до 80 символов.')];
-      await save(userId, 'manager', 'manager_site_address', { siteName: input });
+      await save(userId, 'manager', 'manager_site_address', { ...draft, siteId: null, siteName: input });
       return [send(userId, 'Напишите адрес. Он будет показан кандидату.', [[button('Меню', 'm:home')]])];
     }
     if (current.stage === 'manager_site_address') {
       if (input.length < 5 || input.length > 150) return [send(userId, 'Адрес: от 5 до 150 символов.')];
-      await save(userId, 'manager', 'manager_date', { ...draft, siteAddress: input });
+      const next = { ...draft, siteAddress: input };
+      if (draft.editOriginal) { const clean = cleanEdit(next); await save(userId, 'manager', 'manager_review', clean); return [reviewCard(userId, clean)]; }
+      await save(userId, 'manager', 'manager_date', next);
       return [send(userId, 'Когда нужна подмена?', dateButtons())];
     }
     if (current.stage === 'manager_date') {
@@ -264,6 +353,7 @@ export function createChatBot(store, domain, options = {}) {
       if (dayMatch) { await save(userId, 'manager', 'manager_time', { ...draft, day: presetDay(Number(dayMatch[1])) }); return [send(userId, `Выбрано: ${presetDay(Number(dayMatch[1]))}. Во сколько начать?`, timeButtons())]; }
       const date = fromMoscow(input);
       if (!date || date.getTime() < Date.now() + 3600000) return [send(userId, `Нужно время минимум через час. Например ${presetDay(1)} 9:00 (Москва).`, dateButtons())];
+      if (draft.editOriginal) { const clean = cleanEdit({ ...draft, startsAt: date.toISOString() }); await save(userId, 'manager', 'manager_review', clean); return [reviewCard(userId, clean)]; }
       await save(userId, 'manager', 'manager_hours', { ...draft, startsAt: date.toISOString() });
       return [send(userId, 'Сколько часов длится смена?', [[button('4 часа', 'm:hours:4'), button('6 часов', 'm:hours:6'), button('8 часов', 'm:hours:8')], [button('12 часов', 'm:hours:12')], [button('Своё количество часов', 'm:hours:custom')], [button('Назад', 'm:date')]])];
     }
@@ -273,6 +363,7 @@ export function createChatBot(store, domain, options = {}) {
       const time = /^m:time:(\d{2}:\d{2})$/.exec(input)?.[1] || (/^\d{1,2}:\d{2}$/.test(input) ? input : null);
       const date = time ? fromMoscow(`${draft.day} ${time}`) : null;
       if (!date || date.getTime() < Date.now() + 3600000) return [send(userId, 'Выберите время минимум через час или другой день.', timeButtons())];
+      if (draft.editOriginal) { const clean = cleanEdit({ ...draft, startsAt: date.toISOString() }); await save(userId, 'manager', 'manager_review', clean); return [reviewCard(userId, clean)]; }
       await save(userId, 'manager', 'manager_hours', { ...draft, startsAt: date.toISOString() });
       return [send(userId, `${shortDate(date)}. Сколько часов длится смена?`, [[button('4 часа', 'm:hours:4'), button('6 часов', 'm:hours:6'), button('8 часов', 'm:hours:8')], [button('12 часов', 'm:hours:12')], [button('Своё количество часов', 'm:hours:custom')], [button('Назад', 'm:date')]])];
     }
@@ -280,6 +371,7 @@ export function createChatBot(store, domain, options = {}) {
       if (input === 'm:hours:custom') return [send(userId, 'Напишите своё количество часов числом от 1 до 24.')];
       const hours = Number(input.startsWith('m:hours:') ? input.slice(8) : input);
       if (!Number.isInteger(hours) || hours < 1 || hours > 24) return [send(userId, 'Введите число часов от 1 до 24.')];
+      if (draft.editOriginal) { const clean = cleanEdit({ ...draft, hours }); await save(userId, 'manager', 'manager_review', clean); return [reviewCard(userId, clean)]; }
       await save(userId, 'manager', 'manager_pay', { ...draft, hours });
       return [send(userId, 'Оплата за всю смену?', [[button('4 000 ₽', 'm:pay:4000'), button('5 000 ₽', 'm:pay:5000'), button('6 000 ₽', 'm:pay:6000')], [button('Другая сумма', 'm:pay:custom')]])];
     }
@@ -287,24 +379,27 @@ export function createChatBot(store, domain, options = {}) {
       if (input === 'm:pay:custom') return [send(userId, 'Напишите сумму за смену в рублях, от 1 000 до 100 000.')];
       const payRub = Number((input.startsWith('m:pay:') ? input.slice(6) : input).replace(/\s/g, ''));
       if (!Number.isInteger(payRub) || payRub < 1000 || payRub > 100000) return [send(userId, 'Введите сумму от 1 000 до 100 000 ₽.')];
-      await save(userId, 'manager', 'manager_skill', { ...draft, payRub });
-      return [send(userId, 'Какое требование к кандидату обязательно? Напишите своими словами, например: «Уверенно готовит эспрессо и умеет закрывать кассу». Этот текст кандидат увидит в предложении до подтверждения.', [[button('Меню', 'm:home')]])];
+      if (draft.editOriginal) { const clean = cleanEdit({ ...draft, payRub }); await save(userId, 'manager', 'manager_review', clean); return [reviewCard(userId, clean)]; }
+      await save(userId, 'manager', 'manager_description', { ...draft, payRub });
+      return [send(userId, descriptionPrompt, [[button('Меню', 'm:home')]])];
     }
-    if (current.stage === 'manager_skill') {
-      if (input.length < 2 || input.length > 120 || input.startsWith('m:')) return [send(userId, 'Напишите требование своими словами, от 2 до 120 символов. Его увидит кандидат.')];
-      const next = { ...draft, skill: input };
+    if (['manager_skill', 'manager_description'].includes(current.stage)) {
+      if (input.length < 2 || input.length > 500 || input.startsWith('m:')) return [send(userId, 'Напишите описание смены своими словами, от 2 до 500 символов. Например: задачи, опыт, оборудование и условия.')];
+      const next = cleanEdit({ ...draft, description: input });
       await save(userId, 'manager', 'manager_review', next);
-      return [send(userId, `Проверьте смену\n\n${next.siteName}, ${next.siteAddress}\n${shortDate(next.startsAt)} · ${next.hours} ч · ${next.payRub.toLocaleString('ru-RU')} ₽\n\nКандидат увидит: «${next.skill}»\n\nСначала ищем в команде и резерве. Затем покажем тестовые отклики YouDo и Профи.ру.`, [[button('Опубликовать смену', 'm:publish')], [button('Отмена', 'm:home')]])];
+      return [reviewCard(userId, next)];
     }
     if (current.stage === 'manager_review' && (input === 'm:publish' || input === 'Подтвердить смену')) {
       const start = Date.parse(draft.startsAt);
       let site = draft.siteId ? await get('SELECT id FROM sites WHERE id=? AND workspace_id=?', draft.siteId, workspace) : await get('SELECT id FROM sites WHERE workspace_id=? AND name=? AND address=?', workspace, draft.siteName, draft.siteAddress);
       if (!site) { const saved = await run('INSERT INTO sites(workspace_id,name,address) VALUES (?,?,?)', workspace, draft.siteName, draft.siteAddress); site = { id: saved.lastInsertRowid }; }
-      const created = await domain.create(workspace, { siteId: site.id, role: 'Бариста', startsAt: draft.startsAt, endsAt: new Date(start + draft.hours * 3600000).toISOString(), payRub: draft.payRub, skills: [draft.skill], description: 'Создано в чате MAX', decisionDeadline: new Date(start - 60000).toISOString(), sources: candidateMode ? ['staff', 'reserve', 'max', 'youdo', 'profi'] : ['staff', 'reserve', 'youdo', 'profi'] });
+      const created = await domain.create(workspace, { siteId: site.id, role: 'Бариста', startsAt: draft.startsAt, endsAt: new Date(start + draft.hours * 3600000).toISOString(), payRub: draft.payRub, skills: [], description: draft.description, decisionDeadline: new Date(start - 60000).toISOString(), sources: candidateMode ? ['staff', 'reserve', 'max', 'youdo', 'profi'] : ['staff', 'reserve', 'youdo', 'profi'] });
       await save(userId, 'manager');
       const found = await domain.search(workspace, created.shift.id, { sources: candidateMode ? ['staff', 'reserve', 'max'] : ['staff', 'reserve'] });
       const immediate = found.responses.filter(x => x.status === 'new');
-      return [send(userId, `Смена опубликована. ${immediate.length ? `Сейчас есть ${immediate.length} отклик(а) из команды и резерва.` : 'В команде и резерве пока никого нет.'}\n\nYouDo и Профи.ру: тестовые заявки отправлены. Примерно через 10 секунд покажу учебные отклики отдельным сообщением.`, [[shiftButton(created.shift.id)], [button('Отклики', `m:responses:${created.shift.id}`)], [button('Меню', 'm:home')]], { demoShiftId: created.shift.id })];
+      const members = await reserveService.broadcast(workspace, created.shift.id);
+      const managerMessage = send(userId, `Смена опубликована. ${immediate.length ? `Сейчас есть ${immediate.length} учебный отклик из команды или резерва.` : 'В учебных профилях команды и резерва пока никого нет.'} ${members.length ? `Уведомления отправляем ${members.length} подключённым сотрудникам резерва; их ответы придут отдельно.` : 'Подключённых к MAX сотрудников резерва пока нет.'}\n\nYouDo и Профи.ру: тестовые заявки отправлены. Примерно через 10 секунд покажу учебные отклики отдельным сообщением.`, [[shiftButton(created.shift.id)], [button('Отклики', `m:responses:${created.shift.id}`)], [button('Меню', 'm:home')]], { demoShiftId: created.shift.id });
+      return [managerMessage, ...members.map(member => send(member.userId, `Новая смена из вашего резерва:\n${created.shift.site_name}, ${created.shift.site_address}\n${shortDate(created.shift.starts_at)} · ${draft.hours} ч\nОплата ${created.shift.payRub.toLocaleString('ru-RU')} ₽\nОписание: ${created.shift.description}\n\nМожете выйти?`, [[button('Откликнуться', `r:reply:${userId}:${created.shift.id}:yes`), button('Не могу', `r:reply:${userId}:${created.shift.id}:no`)] ]))];
     }
     return [send(userId, 'Выберите действие в меню.', home)];
   }

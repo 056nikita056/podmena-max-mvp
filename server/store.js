@@ -42,6 +42,8 @@ export async function openStore(path) {
     CREATE TABLE IF NOT EXISTS bot_outbox (update_key TEXT NOT NULL, seq INTEGER NOT NULL, user_id INTEGER NOT NULL, payload_json TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(update_key,seq));
     CREATE TABLE IF NOT EXISTS bot_demo_jobs (shift_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, due_at INTEGER NOT NULL, completed_at TEXT);
     CREATE TABLE IF NOT EXISTS bot_contact_outcomes (shift_id INTEGER NOT NULL, candidate_id INTEGER NOT NULL, manager_id INTEGER NOT NULL, agreed INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(shift_id,candidate_id));
+    CREATE TABLE IF NOT EXISTS bot_reserve_invitations (id INTEGER PRIMARY KEY, workspace_id TEXT NOT NULL, kind TEXT NOT NULL, match_hash TEXT NOT NULL, display TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, expires_at INTEGER NOT NULL, claimed_user_id INTEGER, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS bot_reserve_shift_invites (shift_id INTEGER NOT NULL, candidate_id INTEGER NOT NULL, user_id INTEGER NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(shift_id,candidate_id));
   `;
   for (const sql of schema.split(';').map(part => part.trim()).filter(Boolean)) await db.execute(sql);
   const txContext = new AsyncLocalStorage();

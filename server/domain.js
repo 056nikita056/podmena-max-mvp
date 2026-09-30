@@ -22,7 +22,7 @@ export function createDomain(store) {
   async function detail(workspace, id) {
     const sh = await shift(workspace, id);
     const publications = await all('SELECT source,status,detail FROM publications WHERE shift_id=? ORDER BY id', id);
-    const responses = (await all('SELECT r.id,r.candidate_id AS candidateId,r.status,r.reasons,c.name,COALESCE(r.contact_source,c.source) AS source,c.skills,c.rate_kopecks,c.experience_years,c.available,c.max_profile_url AS maxProfileUrl FROM responses r JOIN candidates c ON c.id=r.candidate_id WHERE r.shift_id=? ORDER BY r.id', id)).map(r => ({ ...r, reasons: parse(r.reasons), skills: parse(r.skills), rateRub: r.rate_kopecks / 100, experienceYears: r.experience_years, available: Boolean(r.available) }));
+    const responses = (await all('SELECT r.id,r.candidate_id AS candidateId,r.status,r.reasons,c.name,COALESCE(r.contact_source,c.source) AS source,c.skills,c.rate_kopecks,c.experience_years,c.available,c.max_profile_url AS maxProfileUrl,c.max_user_id AS maxUserId FROM responses r JOIN candidates c ON c.id=r.candidate_id WHERE r.shift_id=? ORDER BY r.id', id)).map(r => ({ ...r, reasons: parse(r.reasons), skills: parse(r.skills), rateRub: r.rate_kopecks / 100, experienceYears: r.experience_years, available: Boolean(r.available) }));
     const messages = (await all('SELECT id,candidate_id AS candidateId,sender,text,modelled,created_at AS createdAt FROM messages WHERE shift_id=? ORDER BY id', id)).map(m => ({ ...m, modelled: Boolean(m.modelled) }));
     const offer = await get('SELECT o.id,o.candidate_id AS candidateId,o.status,o.starts_at AS startsAt,o.ends_at AS endsAt,o.pay_kopecks/100 AS payRub,o.site_name AS siteName,o.created_at AS createdAt,c.name FROM offers o JOIN candidates c ON c.id=o.candidate_id WHERE o.shift_id=? ORDER BY o.id DESC LIMIT 1', id) || null;
     const events = await all('SELECT kind,text,created_at AS createdAt FROM events WHERE shift_id=? ORDER BY id DESC', id);
@@ -39,7 +39,7 @@ export function createDomain(store) {
     if (![start, end, deadline].every(Number.isFinite) || end <= start || end - start > 24 * 3600000) bad('Проверьте время смены');
     if (deadline >= start) bad('Срок решения должен быть до начала смены');
     if (!Number.isInteger(body.payRub) || body.payRub < 1000 || body.payRub > 100000) bad('Укажите оплату за смену от 1 000 до 100 000 ₽');
-    if (!Array.isArray(body.skills) || !body.skills.length || body.skills.length > 8 || body.skills.some(x => typeof x !== 'string' || x.length > 120)) bad('Укажите обязательные навыки');
+    if (!Array.isArray(body.skills) || body.skills.length > 8 || body.skills.some(x => typeof x !== 'string' || x.length > 120) || (!body.skills.length && (typeof body.description !== 'string' || body.description.trim().length < 2))) bad('Укажите описание смены или навыки');
     if (!Array.isArray(body.sources) || !body.sources.length || body.sources.some(x => !SOURCES.includes(x)) || new Set(body.sources).size !== body.sources.length) bad('Выберите источники');
     if (typeof body.description !== 'string' || body.description.length > 500) bad('Описание не должно превышать 500 символов');
     const scenario = body.scenario || 'success';
@@ -76,10 +76,11 @@ export function createDomain(store) {
           ? await all('SELECT c.* FROM candidates c JOIN reserve r ON r.candidate_id=c.id AND r.workspace_id=c.workspace_id WHERE c.workspace_id=?', workspace)
           : await all('SELECT * FROM candidates WHERE workspace_id=? AND source=?', workspace, source);
         for (const person of people) {
+          if (source === 'reserve' && person.max_user_id) continue;
           const skills = parse(person.skills);
           const exactSkill = sh.skills.every(x => skills.includes(x));
           if (!person.available || (!['max', 'youdo', 'profi'].includes(source) && !exactSkill) || (person.rate_kopecks > sh.pay_kopecks && !options.modelledReplies) || await hasOverlap(workspace, person.id, sh)) continue;
-          const reasons = [exactSkill ? `Навык в профиле: ${skills.join(', ')}` : `Заявлен навык: ${skills.join(', ')}; требование «${sh.skills.join(', ')}» нужно уточнить`, person.rate_kopecks <= sh.pay_kopecks ? `Ставка ${person.rate_kopecks / 100} ₽ в бюджете` : `Ставка ${person.rate_kopecks / 100} ₽ выше бюджета`, source === 'max' ? 'Доступность указана кандидатом в MAX' : 'Доступность указана в демо-профиле'];
+          const reasons = [sh.skills.length ? (exactSkill ? `Навык в профиле: ${skills.join(', ')}` : `Заявлен навык: ${skills.join(', ')}; требование «${sh.skills.join(', ')}» нужно уточнить`) : 'Описание смены нужно обсудить с человеком', person.rate_kopecks <= sh.pay_kopecks ? `Ставка ${person.rate_kopecks / 100} ₽ в бюджете` : `Ставка ${person.rate_kopecks / 100} ₽ выше бюджета`, source === 'max' ? 'Доступность указана кандидатом в MAX' : 'Доступность указана в демо-профиле'];
           await run('INSERT OR IGNORE INTO responses(shift_id,candidate_id,status,reasons,contact_source) VALUES (?,?,?,?,?)', id, person.id, 'new', JSON.stringify(reasons), source);
           if (options.modelledReplies && ['youdo', 'profi'].includes(source) && !(await get('SELECT 1 FROM messages WHERE shift_id=? AND candidate_id=? AND sender=?', id, person.id, 'candidate'))) {
             const reply = source === 'youdo' ? `Здравствуйте! Могу выйти на смену ${dateTextForReply(sh.starts_at)}. Работал(а) с кофейным оборудованием, уточните требования на месте.` : `Добрый день! Дата и оплата подходят. Есть опыт работы бариста, готов(а) обсудить детали смены.`;

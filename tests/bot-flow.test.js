@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHmac } from 'node:crypto';
 import { openStore } from '../server/store.js';
 import { createDomain } from '../server/domain.js';
 import { createChatBot } from '../server/chat-bot.js';
@@ -11,6 +12,11 @@ import { createOutboundLink, readOutboundLink } from '../server/outbound-links.j
 
 const update = (userId, text, mid = `${userId}-${text}`) => ({ update_type: 'message_created', timestamp: Date.now(), message: { sender: { user_id: userId, first_name: userId === 202 ? 'Кандидат' : 'Управляющий', last_name: 'MAX' }, recipient: { chat_type: 'dialog' }, body: { mid, text } } });
 const callback = (userId, payload, id = `${userId}-${payload}`) => ({ update_type: 'message_callback', timestamp: Date.now(), callback: { callback_id: id, payload, user: { user_id: userId, first_name: userId === 202 ? 'Кандидат' : 'Управляющий', last_name: 'MAX' } }, message: { sender: { user_id: 999, is_bot: true }, recipient: { chat_type: 'dialog' } } });
+const started = (userId, payload, username) => ({ update_type: 'bot_started', timestamp: Date.now(), user: { user_id: userId, first_name: 'Сотрудник', last_name: 'Резерва', username }, payload });
+const sharedContact = (userId, phone, token) => {
+  const vcf = `BEGIN:VCARD\r\nVERSION:3.0\r\nTEL;TYPE=cell:${phone}\r\nFN:Сотрудник Резерва\r\nEND:VCARD\r\n`;
+  return { update_type: 'message_created', timestamp: Date.now(), message: { sender: { user_id: userId, first_name: 'Сотрудник', last_name: 'Резерва' }, recipient: { chat_type: 'dialog' }, body: { mid: `contact-${userId}-${phone}`, attachments: [{ type: 'contact', payload: { vcf_info: vcf, hash: createHmac('sha256', token).update(vcf).digest('hex') } }] } } };
+};
 async function botFixture(options = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'podmena-chat-'));
   const store = await openStore(join(dir, 'chat.sqlite'));
@@ -74,7 +80,7 @@ test('two MAX chats complete registration, offer and candidate-only confirmation
     await fx.tap(101, 'm:time:09:00');
     await fx.tap(101, 'm:hours:8');
     const skillPrompt = await fx.tap(101, 'm:pay:6000');
-    assert.match(skillPrompt[0].text, /кандидат увидит/);
+    assert.match(skillPrompt[0].text, /Описание смены/);
     await fx.say(101, 'Эспрессо');
     const published = (await fx.tap(101, 'm:publish'))[0];
     assert.match(published.text, /YouDo и Профи\.ру/);
@@ -86,7 +92,7 @@ test('two MAX chats complete registration, offer and candidate-only confirmation
     const offered = await fx.tap(101, offerButton.payload);
     assert.equal(offered.length, 2);
     assert.equal(offered[1].userId, 202);
-    assert.match(offered[1].text, /Обязательное требование управляющего: Эспрессо/);
+    assert.match(offered[1].text, /Описание: Эспрессо/);
     assert.equal(offered[1].buttons[0][0].payload, `c:accept:${shiftId}`);
     await fx.say(303, '/candidate');
     await fx.say(303, 'Эспрессо');
@@ -116,14 +122,15 @@ test('custom requirement, flexible time and modelled external replies are clear 
     await fx.say(101, '7');
     await fx.tap(101, 'm:pay:6000');
     const requirement = 'Умеет работать с рожковой кофемашиной и спокойно закрывает кассу';
-    assert.match((await fx.say(101, requirement))[0].text, /Кандидат увидит/);
+    assert.match((await fx.say(101, requirement))[0].text, /Описание:/);
     const published = (await fx.tap(101, 'm:publish'))[0];
     const arrivals = await fx.bot.demoArrivals(101, published.demoShiftId);
     assert.match(arrivals[0].text, /Тестовые площадки ответили/);
     assert.ok(arrivals.some(x => /YouDo \(демо\)|Профи\.ру \(демо\)/.test(x.text) && /«/.test(x.text)));
     assert.ok(arrivals.every(x => x.buttons.flat().every(b => !b.payload?.startsWith('m:offer:'))));
     const shift = await fx.domain.detail('max:101', published.demoShiftId);
-    assert.equal(shift.shift.skills[0], requirement);
+    assert.equal(shift.shift.description, requirement);
+    assert.deepEqual(shift.shift.skills, []);
     assert.equal((Date.parse(shift.shift.ends_at) - Date.parse(shift.shift.starts_at)) / 3600000, 7);
     assert.ok(shift.messages.some(x => x.modelled));
     await fx.store.run('UPDATE candidates SET max_profile_url=? WHERE workspace_id=? AND name=?', 'https://max.ru/u/demo-contact', 'max:101', 'София Р.');
@@ -131,6 +138,112 @@ test('custom requirement, flexible time and modelled external replies are clear 
     const youdo = cards.find(x => x.text.includes('София Р.'));
     assert.ok(youdo.buttons.flat().some(x => x.text === 'Открыть YouDo' && readOutboundLink(new URL(x.url).searchParams.get('token'), 'test-secret')?.target === 'platform'));
     assert.ok(youdo.buttons.flat().some(x => x.text === 'Написать в MAX' && readOutboundLink(new URL(x.url).searchParams.get('token'), 'test-secret')?.target === 'max'));
+  } finally { await fx.close(); }
+});
+
+test('manager edits each review field and publishes the revised description', async () => {
+  const fx = await botFixture();
+  try {
+    await fx.say(101, '/manager');
+    const sites = (await fx.tap(101, 'm:new'))[0].buttons.flat().filter(x => /^m:site:\d+$/.test(x.payload || ''));
+    await fx.tap(101, sites[0].payload);
+    await fx.tap(101, 'm:day:custom');
+    await fx.say(101, '03.10.2030 09:00');
+    await fx.tap(101, 'm:hours:8');
+    const prompt = (await fx.tap(101, 'm:pay:5000'))[0];
+    assert.match(prompt.text, /описание/i);
+    const review = (await fx.say(101, 'Бариста на утреннюю смену, работа с кофемашиной.'))[0];
+    assert.ok(review.buttons.flat().some(x => x.payload === 'm:edit:site'));
+    assert.ok(review.buttons.flat().some(x => x.payload === 'm:edit:datetime'));
+    assert.ok(review.buttons.flat().some(x => x.payload === 'm:edit:hours'));
+    assert.ok(review.buttons.flat().some(x => x.payload === 'm:edit:pay'));
+    assert.ok(review.buttons.flat().some(x => x.payload === 'm:edit:description'));
+    await fx.tap(101, 'm:edit:site');
+    const changedSite = (await fx.tap(101, sites[1].payload))[0];
+    assert.match(changedSite.text, /Проверьте смену/);
+    await fx.tap(101, 'm:edit:datetime');
+    assert.match((await fx.say(101, '04.10.2030 12:00'))[0].text, /Проверьте смену/);
+    await fx.tap(101, 'm:edit:hours');
+    assert.match((await fx.say(101, '7'))[0].text, /Проверьте смену/);
+    await fx.tap(101, 'm:edit:pay');
+    assert.match((await fx.say(101, '7500'))[0].text, /Проверьте смену/);
+    await fx.tap(101, 'm:edit:description');
+    assert.match((await fx.say(101, 'Бариста на вечернюю смену; касса и кофемашина.'))[0].text, /Проверьте смену/);
+    await fx.tap(101, 'm:edit:site');
+    await fx.tap(101, 'm:site:new');
+    await fx.say(101, 'Кофейня Лист');
+    assert.match((await fx.say(101, 'Москва, улица Новая, 7'))[0].text, /Проверьте смену/);
+    await fx.tap(101, 'm:edit:hours');
+    assert.match((await fx.tap(101, 'm:review'))[0].text, /7 ч/);
+    const published = (await fx.tap(101, 'm:publish'))[0];
+    const detail = await fx.domain.detail('max:101', published.demoShiftId);
+    assert.equal(detail.shift.site_name, 'Кофейня Лист');
+    assert.equal(new Date(detail.shift.starts_at).toISOString(), '2030-10-04T09:00:00.000Z');
+    assert.equal((Date.parse(detail.shift.ends_at) - Date.parse(detail.shift.starts_at)) / 3600000, 7);
+    assert.equal(detail.shift.payRub, 7500);
+    assert.equal(detail.shift.description, 'Бариста на вечернюю смену; касса и кофемашина.');
+    assert.deepEqual(detail.shift.skills, []);
+  } finally { await fx.close(); }
+});
+
+test('phone invite requires verified contact, then reserve member gets and answers a shift broadcast', async () => {
+  const fx = await botFixture({ inviteSecret: 'invite-secret', botToken: 'test-bot-token', botUsername: 't405_hakaton_max_bot' });
+  try {
+    await fx.say(101, '/manager');
+    assert.match((await fx.tap(101, 'm:reserve:home'))[0].text, /Резерв/);
+    assert.match((await fx.tap(101, 'm:reserve:add'))[0].text, /username.*номер/i);
+    const invited = (await fx.say(101, '+79990001122'))[0];
+    const inviteUrl = invited.text.match(/https:\/\/max\.ru\/t405_hakaton_max_bot\?start=reserve_[A-Za-z0-9_-]+/)?.[0];
+    assert.ok(inviteUrl);
+    const token = new URL(inviteUrl).searchParams.get('start');
+    const prompt = (await fx.bot.handle(started(202, token)))[0];
+    assert.ok(prompt.buttons.flat().some(x => x.type === 'request_contact'));
+    assert.match((await fx.bot.handle(sharedContact(202, '79990000000', 'test-bot-token')))[0].text, /не совпадает/i);
+    const confirmed = (await fx.bot.handle(sharedContact(202, '79990001122', 'test-bot-token')))[0];
+    assert.ok(confirmed.buttons.flat().some(x => x.payload?.startsWith('r:join:')));
+    const joinPayload = confirmed.buttons.flat().find(x => x.payload?.startsWith('r:join:')).payload;
+    const joined = await fx.tap(202, joinPayload);
+    assert.ok(joined.some(x => x.userId === 101 && /присоединился/i.test(x.text)));
+    const member = await fx.store.get('SELECT c.id,c.max_user_id FROM candidates c JOIN reserve r ON r.candidate_id=c.id WHERE r.workspace_id=? AND c.max_user_id=?', 'max:101', 202);
+    assert.equal(member.max_user_id, 202);
+    const sites = (await fx.tap(101, 'm:new'))[0].buttons.flat();
+    await fx.tap(101, sites.find(x => /^m:site:\d+$/.test(x.payload || '')).payload);
+    await fx.tap(101, 'm:day:1');
+    await fx.tap(101, 'm:time:09:00');
+    await fx.tap(101, 'm:hours:8');
+    await fx.tap(101, 'm:pay:6000');
+    await fx.say(101, 'Бариста на смену: касса, кофемашина, помощь команде.');
+    const published = await fx.tap(101, 'm:publish');
+    const shiftId = published[0].demoShiftId;
+    const broadcast = published.find(x => x.userId === 202);
+    assert.ok(broadcast);
+    assert.match(broadcast.text, /касса, кофемашина/);
+    assert.ok(!(await fx.domain.detail('max:101', shiftId)).responses.some(x => x.candidateId === member.id));
+    const responsePayload = broadcast.buttons.flat().find(x => /Откликнуться/.test(x.text)).payload;
+    assert.match((await fx.tap(303, responsePayload))[0].text, /недоступно/i);
+    const answered = await fx.tap(202, responsePayload);
+    assert.ok(answered.some(x => x.userId === 101 && /откликнулся/i.test(x.text)));
+    assert.ok((await fx.domain.detail('max:101', shiftId)).responses.some(x => x.candidateId === member.id && x.source === 'reserve'));
+    await fx.bot.demoArrivals(101, shiftId);
+    const cards = await fx.tap(101, `m:responses:${shiftId}`);
+    assert.ok(cards.some(x => x.text.includes('Сотрудник Резерва')));
+  } finally { await fx.close(); }
+});
+
+test('username reserve invite can only be accepted by that MAX username', async () => {
+  const fx = await botFixture({ inviteSecret: 'invite-secret', botUsername: 't405_hakaton_max_bot' });
+  try {
+    await fx.say(101, '/manager');
+    await fx.tap(101, 'm:reserve:add');
+    assert.match((await fx.say(101, 'not-a-number@'))[0].text, /Укажите username/);
+    const invite = (await fx.say(101, '@coffee_helper'))[0];
+    const payload = new URL(invite.text.match(/https:\/\/max\.ru\/[^\s]+/)?.[0]).searchParams.get('start');
+    assert.match((await fx.bot.handle(started(202, payload, 'someone_else')))[0].text, /не совпадает/i);
+    const accepted = (await fx.bot.handle(started(202, payload, 'coffee_helper')))[0];
+    const join = accepted.buttons.flat().find(x => x.payload?.startsWith('r:join:'));
+    assert.ok(join);
+    await fx.tap(202, join.payload);
+    assert.equal((await fx.store.get('SELECT max_profile_url AS url FROM candidates WHERE workspace_id=? AND max_user_id=?', 'max:101', 202)).url, 'https://max.ru/coffee_helper');
   } finally { await fx.close(); }
 });
 
@@ -211,7 +324,7 @@ test('webhook authenticates, ignores group messages, and retries an undelivered 
   const delivered = [];
   const answered = [];
   let fail = true;
-  const app = createServer({ databasePath: join(dir, 'hook.sqlite'), webhookSecret: 'hook-secret', sessionSecret: 'session-secret', answerBotCallback: async (id, body) => answered.push({ id, body }), sendBotMessage: async (userId, payload) => {
+  const app = createServer({ databasePath: join(dir, 'hook.sqlite'), webhookSecret: 'hook-secret', sessionSecret: 'session-secret', botToken: 'test-bot-token', answerBotCallback: async (id, body) => answered.push({ id, body }), sendBotMessage: async (userId, payload) => {
     if (fail) { fail = false; throw new Error('delivery unavailable'); }
     delivered.push({ userId, payload });
   } });
@@ -235,6 +348,14 @@ test('webhook authenticates, ignores group messages, and retries an undelivered 
     group.message.recipient.chat_type = 'chat';
     assert.equal((await post(group, 'hook-secret')).status, 200);
     assert.equal(delivered.length, 2);
+    assert.equal((await post(callback(101, 'm:reserve:add', 'reserve-add'), 'hook-secret')).status, 200);
+    assert.equal((await post(update(101, '+79990001122', 'reserve-contact'), 'hook-secret')).status, 200);
+    const inviteUrl = delivered.at(-1).payload.text.match(/https:\/\/max\.ru\/t405_hakaton_max_bot\?start=reserve_[A-Za-z0-9_-]+/)?.[0];
+    assert.ok(inviteUrl);
+    assert.equal((await post(started(202, new URL(inviteUrl).searchParams.get('start')), 'hook-secret')).status, 200);
+    assert.equal(delivered.at(-1).payload.attachments[0].payload.buttons[0][0].type, 'request_contact');
+    assert.equal((await post(sharedContact(202, '79990001122', 'test-bot-token'), 'hook-secret')).status, 200);
+    assert.ok(delivered.at(-1).payload.attachments[0].payload.buttons.flat().some(x => x.payload?.startsWith('r:join:')));
   } finally { if (app.listening) await new Promise(resolve => app.close(resolve)); rmSync(dir, { recursive: true, force: true }); }
 });
 
